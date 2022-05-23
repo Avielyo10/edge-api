@@ -25,9 +25,9 @@ require (
 	github.com/spf13/viper v1.10.1
 	golang.org/x/crypto v0.0.0-20211215153901-e495a2d5b3d3 // indirect
 	gopkg.in/confluentinc/confluent-kafka-go.v1 v1.8.2
-	gorm.io/driver/postgres v1.3.1
+	gorm.io/driver/postgres v1.3.6
 	gorm.io/driver/sqlite v1.3.1
-	gorm.io/gorm v1.23.1
+	gorm.io/gorm v1.23.4
 )
 
 go 1.16
