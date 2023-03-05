@@ -1,10 +1,15 @@
+// FIXME: golangci-lint
+// nolint:revive
 package common
 
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/redhatinsights/edge-api/pkg/db"
 
 	"gorm.io/gorm"
 )
@@ -22,18 +27,60 @@ type Filter struct {
 func ContainFilterHandler(filter *Filter) FilterFunc {
 	return FilterFunc(func(r *http.Request, tx *gorm.DB) *gorm.DB {
 		if multipleStatusQuery := r.URL.Query()[filter.QueryParam]; len(multipleStatusQuery) > 1 {
+			containFilter := db.DB
 			for i, query := range multipleStatusQuery {
 				if i == 0 {
-					tx = tx.Where(fmt.Sprintf("%s LIKE ?", filter.DBField), "%"+query+"%")
+					containFilter = containFilter.Where(fmt.Sprintf("upper(%s) LIKE ?", filter.DBField), "%"+strings.ToUpper(query)+"%")
+
 				} else {
-					tx = tx.Or(fmt.Sprintf("%s LIKE ?", filter.DBField), "%"+query+"%")
+					containFilter = containFilter.Or(fmt.Sprintf("upper(%s) LIKE ?", filter.DBField), "%"+strings.ToUpper(query)+"%")
 				}
 			}
+			// this will ensure that the SQL OR will be grouped in brackets
+			// for example:  WHERE (status LIKE '%SUCCESS%' OR status LIKE '%ERROR%') AND org_id = 'XXXXXXXX'
+			// otherwise it will be merged with other SQL AND operator, the results will be unpredictable
+			// for example without brackets :
+			// WHERE status LIKE '%SUCCESS%' OR status LIKE '%ERROR%' AND org_id = 'XXXXXXXX'
+			tx = tx.Where(containFilter)
 		} else if val := r.URL.Query().Get(filter.QueryParam); val != "" {
-			tx = tx.Where(fmt.Sprintf("%s LIKE ?", filter.DBField), "%"+val+"%")
+			tx = tx.Where(fmt.Sprintf("upper(%s) LIKE ?", filter.DBField), "%"+strings.ToUpper(val)+"%")
 		}
 		return tx
 	})
+}
+
+// BoolFilterHandler handles boolean values filters
+func BoolFilterHandler(filter *Filter) FilterFunc {
+	sqlQuery := fmt.Sprintf("%s = ", filter.DBField)
+	return FilterFunc(func(r *http.Request, tx *gorm.DB) *gorm.DB {
+		value := r.URL.Query().Get(filter.QueryParam)
+		if value == "" {
+			return tx
+		}
+		var sqlValue string
+		if value == "true" {
+			sqlValue = "TRUE"
+		} else {
+			sqlValue = "FALSE"
+		}
+		return tx.Where(sqlQuery + sqlValue)
+	})
+}
+
+// IntegerNumberFilterHandler handles integer number values filters
+func IntegerNumberFilterHandler(filter *Filter) FilterFunc {
+	sqlQuery := fmt.Sprintf("%s = ?", filter.DBField)
+	return func(r *http.Request, tx *gorm.DB) *gorm.DB {
+		value := r.URL.Query().Get(filter.QueryParam)
+		if value == "" {
+			return tx
+		}
+		intValue, err := strconv.Atoi(value)
+		if err != nil {
+			return nil
+		}
+		return tx.Where(sqlQuery, intValue)
+	}
 }
 
 // OneOfFilterHandler handles multiple values filters
@@ -59,7 +106,7 @@ func CreatedAtFilterHandler(filter *Filter) FilterFunc {
 				return tx
 			}
 			nextDay := currentDay.Add(time.Hour * 24)
-			tx = tx.Where("%s BETWEEN ? AND ?", filter.DBField, currentDay.Format(LayoutISO), nextDay.Format(LayoutISO))
+			tx = tx.Where(fmt.Sprintf("%s BETWEEN ? AND ?", filter.DBField), currentDay.Format(LayoutISO), nextDay.Format(LayoutISO))
 		}
 		return tx
 	})

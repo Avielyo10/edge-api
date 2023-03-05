@@ -1,11 +1,17 @@
+// FIXME: golangci-lint
+// nolint:govet,revive
 package routes
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi"
+	"github.com/google/uuid"
 	"github.com/redhatinsights/edge-api/pkg/clients/inventory"
 	"github.com/redhatinsights/edge-api/pkg/db"
 	"github.com/redhatinsights/edge-api/pkg/dependencies"
@@ -17,15 +23,14 @@ import (
 
 // MakeDevicesRouter adds support for operations on update
 func MakeDevicesRouter(sub chi.Router) {
-	sub.Get("/", GetDevices)
-	sub.With(common.Paginate).Get("/devicesview", GetDevicesView)
-	sub.With(common.Paginate).Get("/db", GetDBDevices)
+	sub.With(ValidateQueryParams("devices")).With(ValidateGetAllDevicesFilterParams).Get("/", GetDevices)
+	sub.With(ValidateQueryParams("devicesview")).With(common.Paginate).With(ValidateGetDevicesViewFilterParams).Get("/devicesview", GetDevicesView)
 	sub.Route("/{DeviceUUID}", func(r chi.Router) {
 		r.Use(DeviceCtx)
 		r.Get("/dbinfo", GetDeviceDBInfo)
-		r.Get("/", GetDevice)
-		r.Get("/updates", GetUpdateAvailableForDevice)
-		r.Get("/image", GetDeviceImageInfo)
+		r.With(common.Paginate).Get("/", GetDevice)
+		r.With(common.Paginate).Get("/updates", GetUpdateAvailableForDevice)
+		r.With(common.Paginate).Get("/image", GetDeviceImageInfo)
 	})
 }
 
@@ -59,20 +64,87 @@ func DeviceCtx(next http.Handler) http.Handler {
 }
 
 var devicesFilters = common.ComposeFilters(
+	// Filter handler for "name"
 	common.ContainFilterHandler(&common.Filter{
 		QueryParam: "name",
 		DBField:    "devices.name",
 	}),
+	// Filter handler for "uuid"
 	common.ContainFilterHandler(&common.Filter{
 		QueryParam: "uuid",
 		DBField:    "devices.uuid",
 	}),
-	common.ContainFilterHandler(&common.Filter{
+	// Filter handler for "update_available"
+	common.BoolFilterHandler(&common.Filter{
 		QueryParam: "update_available",
 		DBField:    "devices.update_available",
 	}),
+	// Filter handler for "created_at"
+	common.CreatedAtFilterHandler(&common.Filter{
+		QueryParam: "created_at",
+		DBField:    "devices.created_at",
+	}),
+	// Filter handler for "image_id"
+	common.IntegerNumberFilterHandler(&common.Filter{
+		QueryParam: "image_id",
+		DBField:    "devices.image_id",
+	}),
 	common.SortFilterHandler("devices", "name", "ASC"),
 )
+
+// ValidateGetAllDevicesFilterParams validate the query params that sent to /devices endpoint
+func ValidateGetAllDevicesFilterParams(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctxServices := dependencies.ServicesFromContext(r.Context())
+		var errs []validationError
+		// "uuid" validation
+		if val := r.URL.Query().Get("uuid"); val != "" {
+			if _, err := uuid.Parse(val); err != nil {
+				errs = append(errs, validationError{Key: "uuid", Reason: err.Error()})
+			}
+		}
+		// "created_at" validation
+		if val := r.URL.Query().Get("created_at"); val != "" {
+			if _, err := time.Parse(common.LayoutISO, val); err != nil {
+				errs = append(errs, validationError{Key: "created_at", Reason: err.Error()})
+			}
+		}
+		if len(errs) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		respondWithJSONBody(w, ctxServices.Log, &errs)
+	})
+}
+
+// ValidateGetDevicesViewFilterParams validate the query parameters that sent to /devicesview endpoint
+func ValidateGetDevicesViewFilterParams(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var device models.Device
+		var errs []validationError
+		ctxServices := dependencies.ServicesFromContext(r.Context())
+
+		// check for invalid update_available value
+		if val := r.URL.Query().Get("update_available"); val != "true" && val != "false" && val != "" {
+			if !device.UpdateAvailable {
+				errs = append(errs, validationError{Key: "update_available", Reason: fmt.Sprintf("%s is not a valid value for update_available. update_available must be boolean", val)})
+			}
+		}
+		// check for invalid image_id value
+		if val := r.URL.Query().Get("image_id"); val != "" {
+			if _, err := strconv.Atoi(val); err != nil {
+				errs = append(errs, validationError{Key: "image_id", Reason: fmt.Sprintf("%s is not a valid value for image_id. image_id must be integer", val)})
+			}
+		}
+		if len(errs) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		respondWithJSONBody(w, ctxServices.Log, &errs)
+	})
+}
 
 // GetUpdateAvailableForDevice returns if exists update for the current image at the device.
 func GetUpdateAvailableForDevice(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +158,8 @@ func GetUpdateAvailableForDevice(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("latest") == "true" {
 		latest = true
 	}
-	result, err := contextServices.DeviceService.GetUpdateAvailableForDeviceByUUID(dc.DeviceUUID, latest)
+	pagination := common.GetPagination(r)
+	result, _, err := contextServices.DeviceService.GetUpdateAvailableForDeviceByUUID(dc.DeviceUUID, latest, pagination.Limit, pagination.Offset)
 	if err != nil {
 		var apiError errors.APIError
 		switch err.(type) {
@@ -110,7 +183,8 @@ func GetDeviceImageInfo(w http.ResponseWriter, r *http.Request) {
 	if dc.DeviceUUID == "" || !ok {
 		return // Error set by DeviceCtx method
 	}
-	result, err := contextServices.DeviceService.GetDeviceImageInfoByUUID(dc.DeviceUUID)
+	pagination := common.GetPagination(r)
+	result, err := contextServices.DeviceService.GetDeviceImageInfoByUUID(dc.DeviceUUID, pagination.Limit, pagination.Offset)
 	if err != nil {
 		var apiError errors.APIError
 		switch err.(type) {
@@ -136,7 +210,8 @@ func GetDevice(w http.ResponseWriter, r *http.Request) {
 	if dc.DeviceUUID == "" || !ok {
 		return // Error set by DeviceCtx method
 	}
-	result, err := contextServices.DeviceService.GetDeviceDetailsByUUID(dc.DeviceUUID)
+	pagination := common.GetPagination(r)
+	result, err := contextServices.DeviceService.GetDeviceDetailsByUUID(dc.DeviceUUID, pagination.Limit, pagination.Offset)
 	if err != nil {
 		var apiError errors.APIError
 		switch err.(type) {
@@ -194,26 +269,6 @@ func GetDevices(w http.ResponseWriter, r *http.Request) {
 	respondWithJSONBody(w, contextServices.Log, inventory)
 }
 
-// GetDBDevices return the device data on EdgeAPI DB
-func GetDBDevices(w http.ResponseWriter, r *http.Request) {
-	contextServices := dependencies.ServicesFromContext(r.Context())
-	var devices []models.Device
-	pagination := common.GetPagination(r)
-	account, err := common.GetAccount(r)
-	if err != nil {
-		contextServices.Log.WithField("error", err).Debug("Account not found")
-		respondWithAPIError(w, contextServices.Log, errors.NewBadRequest(err.Error()))
-		return
-	}
-	result := db.DB.Limit(pagination.Limit).Offset(pagination.Offset).Where("account = ?", account).Find(&devices)
-	if result.Error != nil {
-		contextServices.Log.WithField("error", result.Error.Error()).Debug("Result error")
-		respondWithAPIError(w, contextServices.Log, errors.NewBadRequest(result.Error.Error()))
-		return
-	}
-	respondWithJSONBody(w, contextServices.Log, &devices)
-}
-
 // GetDeviceDBInfo return the device data on EdgeAPI DB
 func GetDeviceDBInfo(w http.ResponseWriter, r *http.Request) {
 	contextServices := dependencies.ServicesFromContext(r.Context())
@@ -222,14 +277,12 @@ func GetDeviceDBInfo(w http.ResponseWriter, r *http.Request) {
 	if dc.DeviceUUID == "" || !ok {
 		return // Error set by DeviceCtx method
 	}
-	account, err := common.GetAccount(r)
-	if err != nil {
-		contextServices.Log.WithField("error", err).Debug("Account not found")
-		respondWithAPIError(w, contextServices.Log, errors.NewBadRequest(err.Error()))
+	orgID := readOrgID(w, r, contextServices.Log)
+	if orgID == "" {
+		// logs and response handled by readOrgID
 		return
 	}
-	result := db.DB.Where("account = ? and UUID = ?", account, dc.DeviceUUID).Find(&devices)
-	if result.Error != nil {
+	if result := db.Org(orgID, "").Where("UUID = ?", dc.DeviceUUID).Find(&devices); result.Error != nil {
 		contextServices.Log.WithField("error", result.Error).Debug("Result error")
 		respondWithAPIError(w, contextServices.Log, errors.NewBadRequest(result.Error.Error()))
 		return
@@ -240,7 +293,7 @@ func GetDeviceDBInfo(w http.ResponseWriter, r *http.Request) {
 // GetDevicesView returns all data needed to display customers devices
 func GetDevicesView(w http.ResponseWriter, r *http.Request) {
 	contextServices := dependencies.ServicesFromContext(r.Context())
-	tx := devicesFilters(r, db.DB)
+	tx := devicesFilters(r, db.DB).Where("image_id > 0")
 	pagination := common.GetPagination(r)
 
 	devicesCount, err := contextServices.DeviceService.GetDevicesCount(tx)

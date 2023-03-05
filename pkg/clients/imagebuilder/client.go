@@ -1,3 +1,6 @@
+// Package imagebuilder provides Image Builder API client functions
+// FIXME: golangci-lint
+// nolint:errcheck,govet,revive
 package imagebuilder
 
 import (
@@ -6,15 +9,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"net/url"
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/redhatinsights/edge-api/config"
 	"github.com/redhatinsights/edge-api/pkg/clients"
 	"github.com/redhatinsights/edge-api/pkg/db"
 	"github.com/redhatinsights/edge-api/pkg/models"
+	feature "github.com/redhatinsights/edge-api/unleash/features"
+
+	"github.com/redhatinsights/edge-api/config"
 )
 
 // ClientInterface is an Interface to make request to ImageBuilder
@@ -24,6 +30,7 @@ type ClientInterface interface {
 	GetCommitStatus(image *models.Image) (*models.Image, error)
 	GetInstallerStatus(image *models.Image) (*models.Image, error)
 	GetMetadata(image *models.Image) (*models.Image, error)
+	SearchPackage(packageName string, arch string, dist string) (*SearchPackageResult, error)
 }
 
 // Client is the implementation of an ClientInterface
@@ -41,8 +48,11 @@ func InitClient(ctx context.Context, log *log.Entry) *Client {
 
 // OSTree gives OSTree information for an image
 type OSTree struct {
-	URL string `json:"url,omitempty"`
-	Ref string `json:"ref"`
+	URL        string `json:"url,omitempty"`
+	ContentURL string `json:"contenturl,omitempty"`
+	RHSM       bool   `json:"rhsm,omitempty"`
+	Ref        string `json:"ref"`
+	ParentRef  string `json:"parent,omitempty"`
 }
 
 // Customizations is made of the packages that are baked into an image
@@ -59,7 +69,7 @@ type Repository struct {
 	IgnoreSSL  *bool   `json:"ignore_ssl,omitempty"`
 	MetaLink   *string `json:"metalink,omitempty"`
 	MirrorList *string `json:"mirrorlist,omitempty"`
-	RHSM       bool    `json:"rhsm,omitempty"`
+	RHSM       bool    `json:"rhsm"`
 }
 
 // UploadRequest is the upload options accepted by Image Builder API
@@ -95,17 +105,19 @@ type ComposeStatus struct {
 type ImageStatus struct {
 	Status       imageStatusValue `json:"status"`
 	UploadStatus *UploadStatus    `json:"upload_status,omitempty"`
+	Reason       imageStatusValue `json:"reason"`
 }
 
 type imageStatusValue string
 
 const (
-	imageStatusBulding     imageStatusValue = "building"
+	imageStatusBuilding    imageStatusValue = "building"
 	imageStatusFailure     imageStatusValue = "failure"
 	imageStatusPending     imageStatusValue = "pending"
 	imageStatusRegistering imageStatusValue = "registering"
 	imageStatusSuccess     imageStatusValue = "success"
 	imageStatusUploading   imageStatusValue = "uploading"
+	imageReasonFailure     imageStatusValue = "Worker running this job stopped responding"
 )
 
 // UploadStatus is the status and metadata of an Image upload
@@ -123,6 +135,29 @@ type ComposeResult struct {
 // S3UploadStatus contains the URL to the S3 Bucket
 type S3UploadStatus struct {
 	URL string `json:"url"`
+}
+
+// MetaCount contains Count of a SearchPackageResult
+type MetaCount struct {
+	Count int `json:"count"`
+}
+
+// SearchPackage contains Name of package
+type SearchPackage struct {
+	Name string `json:"name"`
+}
+
+// SearchPackageResult contains Meta of a MetaCount
+type SearchPackageResult struct {
+	Meta MetaCount       `json:"meta"`
+	Data []SearchPackage `json:"data"`
+}
+
+// PackageRequestError indicates request search packages from Image Builder
+type PackageRequestError struct{}
+
+func (e *PackageRequestError) Error() string {
+	return "image builder search packages request error"
 }
 
 // Metadata struct to get the metadata response
@@ -163,17 +198,10 @@ func (c *Client) compose(composeReq *ComposeRequest) (*ComposeResult, error) {
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
-		var code int
-		if res != nil {
-			code = res.StatusCode
-		}
-		c.log.WithFields(log.Fields{
-			"statusCode": code,
-			"error":      err,
-		}).Error("Image Builder Compose Request Error")
+		c.log.WithField("error", err.Error()).Error("Image Builder Compose Request Error")
 		return nil, err
 	}
-	respBody, err := ioutil.ReadAll(res.Body)
+	respBody, err := io.ReadAll(res.Body)
 	c.log.WithFields(log.Fields{
 		"statusCode":   res.StatusCode,
 		"responseBody": string(respBody),
@@ -230,6 +258,15 @@ func (c *Client) ComposeCommit(image *models.Image) (*models.Image, error) {
 			req.ImageRequests[0].Ostree = &OSTree{}
 		}
 		req.ImageRequests[0].Ostree.URL = image.Commit.OSTreeParentCommit
+		if feature.StorageImagesRepos.IsEnabled() {
+			req.ImageRequests[0].Ostree.RHSM = true
+			// because of some redirect failures (SSL connect), use the same url as URL
+			req.ImageRequests[0].Ostree.ContentURL = req.ImageRequests[0].Ostree.URL
+		}
+
+		if image.Commit.OSTreeRef != "" && image.Commit.OSTreeParentRef != "" && image.Commit.OSTreeRef != image.Commit.OSTreeParentRef {
+			req.ImageRequests[0].Ostree.ParentRef = image.Commit.OSTreeParentRef
+		}
 	}
 
 	cr, err := c.compose(req)
@@ -246,6 +283,16 @@ func (c *Client) ComposeCommit(image *models.Image) (*models.Image, error) {
 // ComposeInstaller composes a Installer on ImageBuilder
 func (c *Client) ComposeInstaller(image *models.Image) (*models.Image, error) {
 	pkgs := make([]string, 0)
+	var repoURL string
+	var rhsm bool
+	if feature.StorageImagesRepos.IsEnabled() {
+		repoURL = fmt.Sprintf("%s/api/edge/v1/storage/images-repos/%d", config.Get().EdgeCertAPIBaseURL, image.ID)
+		rhsm = true
+	} else {
+		repoURL = image.Commit.Repo.URL
+		rhsm = false
+	}
+
 	req := &ComposeRequest{
 		Customizations: &Customizations{
 			Packages: &pkgs,
@@ -257,8 +304,10 @@ func (c *Client) ComposeInstaller(image *models.Image) (*models.Image, error) {
 				Architecture: image.Commit.Arch,
 				ImageType:    models.ImageTypeInstaller,
 				Ostree: &OSTree{
-					Ref: "rhel/8/x86_64/edge", //image.Commit.OSTreeRef,
-					URL: image.Commit.Repo.URL,
+					Ref:        image.Commit.OSTreeRef,
+					URL:        repoURL,
+					ContentURL: repoURL, // because of some redirect failures (SSL connect), use the same url as URL
+					RHSM:       rhsm,
 				},
 				UploadRequest: &UploadRequest{
 					Options: make(map[string]string),
@@ -274,7 +323,9 @@ func (c *Client) ComposeInstaller(image *models.Image) (*models.Image, error) {
 		image.Installer.ComposeJobID = cr.ID
 		image.Installer.Status = models.ImageStatusBuilding
 		image.Status = models.ImageStatusBuilding
+
 	}
+	image.Commit.ExternalURL = false
 	tx := db.DB.Save(&image)
 	if tx.Error != nil {
 		c.log.WithField("error", tx.Error.Error()).Error("Error saving image")
@@ -289,13 +340,12 @@ func (c *Client) ComposeInstaller(image *models.Image) (*models.Image, error) {
 	return image, nil
 }
 
-func (c *Client) getComposeStatus(jobID string) (*ComposeStatus, error) {
+// GetComposeStatus returns a compose job status given a specific ID
+func (c *Client) GetComposeStatus(jobID string) (*ComposeStatus, error) {
 	cs := &ComposeStatus{}
 	cfg := config.Get()
 	url := fmt.Sprintf("%s/api/image-builder/v1/composes/%s", cfg.ImageBuilderConfig.URL, jobID)
-	c.log.WithFields(log.Fields{
-		"url": url,
-	}).Debug("Image Builder ComposeStatus Request Started")
+	c.log.Info("Image Builder ComposeStatus Request Started")
 	req, _ := http.NewRequest("GET", url, nil)
 	for key, value := range clients.GetOutgoingHeaders(c.ctx) {
 		req.Header.Add(key, value)
@@ -304,13 +354,10 @@ func (c *Client) getComposeStatus(jobID string) (*ComposeStatus, error) {
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
-		c.log.WithFields(log.Fields{
-			"statusCode": res.StatusCode,
-			"error":      err,
-		}).Error("Image Builder ComposeStatus Request Error")
+		c.log.WithField("error", err.Error()).Error("Image Builder ComposeStatus Request Error")
 		return nil, err
 	}
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	c.log.WithFields(log.Fields{
 		"statusCode":   res.StatusCode,
 		"responseBody": string(body),
@@ -325,6 +372,9 @@ func (c *Client) getComposeStatus(jobID string) (*ComposeStatus, error) {
 	}
 
 	err = json.Unmarshal(body, &cs)
+	if cs.ImageStatus.Reason == imageReasonFailure && cs.ImageStatus.Status == imageStatusFailure {
+		return nil, fmt.Errorf("worker running this job stopped responding")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +384,7 @@ func (c *Client) getComposeStatus(jobID string) (*ComposeStatus, error) {
 
 // GetCommitStatus gets the Commit status on Image Builder
 func (c *Client) GetCommitStatus(image *models.Image) (*models.Image, error) {
-	cs, err := c.getComposeStatus(image.Commit.ComposeJobID)
+	cs, err := c.GetComposeStatus(image.Commit.ComposeJobID)
 	if err != nil {
 		return nil, err
 	}
@@ -343,6 +393,7 @@ func (c *Client) GetCommitStatus(image *models.Image) (*models.Image, error) {
 		c.log.Info("Set image commit status with success")
 		image.Commit.Status = models.ImageStatusSuccess
 		image.Commit.ImageBuildTarURL = cs.ImageStatus.UploadStatus.Options.URL
+		image.Commit.ExternalURL = true
 	} else if cs.ImageStatus.Status == imageStatusFailure {
 		c.log.Info("Set image and image commit status with error")
 		image.Commit.Status = models.ImageStatusError
@@ -353,7 +404,7 @@ func (c *Client) GetCommitStatus(image *models.Image) (*models.Image, error) {
 
 // GetInstallerStatus gets the Installer status on Image Builder
 func (c *Client) GetInstallerStatus(image *models.Image) (*models.Image, error) {
-	cs, err := c.getComposeStatus(image.Installer.ComposeJobID)
+	cs, err := c.GetComposeStatus(image.Installer.ComposeJobID)
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +423,7 @@ func (c *Client) GetInstallerStatus(image *models.Image) (*models.Image, error) 
 
 // GetMetadata returns the metadata on image builder for a particular image based on the ComposeJobID
 func (c *Client) GetMetadata(image *models.Image) (*models.Image, error) {
-	c.log.Infof("Getting metadata for image")
+	c.log.Info("Getting metadata for image")
 	composeJobID := image.Commit.ComposeJobID
 	cfg := config.Get()
 	url := fmt.Sprintf("%s/api/image-builder/v1/composes/%s/metadata", cfg.ImageBuilderConfig.URL, composeJobID)
@@ -390,13 +441,10 @@ func (c *Client) GetMetadata(image *models.Image) (*models.Image, error) {
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
-		c.log.WithFields(log.Fields{
-			"statusCode": res.StatusCode,
-			"error":      err,
-		}).Error("Image Builder GetMetadata Request Error")
+		c.log.WithField("error", err.Error()).Error("Image Builder GetMetadata Request Error")
 		return nil, err
 	}
-	respBody, err := ioutil.ReadAll(res.Body)
+	respBody, err := io.ReadAll(res.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +460,7 @@ func (c *Client) GetMetadata(image *models.Image) (*models.Image, error) {
 
 	var metadata Metadata
 	if err := json.Unmarshal(respBody, &metadata); err != nil {
-		c.log.Error("Error while trying to unmarshal ", metadata)
+		c.log.WithField("response", metadata).Error("Error while trying to unmarshal Image Builder GetMetadata Response")
 		return nil, err
 	}
 	for n := range metadata.InstalledPackages {
@@ -425,7 +473,7 @@ func (c *Client) GetMetadata(image *models.Image) (*models.Image, error) {
 		image.Commit.InstalledPackages = append(image.Commit.InstalledPackages, pkg)
 	}
 	image.Commit.OSTreeCommit = metadata.OstreeCommit
-	c.log.Infof("Done with metadata for image")
+	c.log.Info("Done with metadata for image")
 	return image, nil
 }
 
@@ -434,8 +482,8 @@ func (c *Client) GetImageThirdPartyRepos(image *models.Image) ([]Repository, err
 	if len(image.ThirdPartyRepositories) == 0 {
 		return []Repository{}, nil
 	}
-	if image.Account == "" {
-		return nil, errors.New("error retrieving account information, image account undefined")
+	if image.OrgID == "" {
+		return nil, errors.New("error retrieving orgID  information, image orgID undefined")
 	}
 	repos := make([]Repository, len(image.ThirdPartyRepositories))
 	thirdpartyrepos := make([]models.ThirdPartyRepo, len(image.ThirdPartyRepositories))
@@ -445,9 +493,9 @@ func (c *Client) GetImageThirdPartyRepos(image *models.Image) ([]Repository, err
 		thirdpartyrepoIDS[repo] = int(image.ThirdPartyRepositories[repo].ID)
 	}
 	var count int64
-	result := db.DB.Where("account = ?", image.Account).Find(&thirdpartyrepos, thirdpartyrepoIDS).Count(&count)
+	result := db.Org(image.OrgID, "").Find(&thirdpartyrepos, thirdpartyrepoIDS).Count(&count)
 	if result.Error != nil {
-		log.Error(result.Error)
+		c.log.WithField("error", result.Error).Error("Error finding custom repositories")
 		return nil, result.Error
 	}
 
@@ -461,4 +509,48 @@ func (c *Client) GetImageThirdPartyRepos(image *models.Image) ([]Repository, err
 	}
 
 	return repos, nil
+}
+
+// SearchPackage validate package name with Image Builder API
+func (c *Client) SearchPackage(packageName string, arch string, dist string) (*SearchPackageResult, error) {
+	c.log.Infof("Searching rhel package")
+	cfg := config.Get()
+	if packageName == "" || arch == "" || dist == "" {
+		return nil, errors.New("mandatory fields should not be empty")
+	}
+
+	// build the correct URL using the package name
+	url := fmt.Sprintf("%s/api/image-builder/v1/packages?distribution=%s&architecture=%s&search=%s", cfg.ImageBuilderConfig.URL, dist, arch, url.QueryEscape(packageName))
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range clients.GetOutgoingHeaders(c.ctx) {
+		req.Header.Add(key, value)
+	}
+	client := &http.Client{}
+	res, err := client.Do(req)
+	if err != nil {
+		c.log.WithField("error", err.Error()).Error(new(PackageRequestError))
+		return nil, err
+	}
+	respBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		c.log.WithFields(log.Fields{
+			"statusCode": res.StatusCode,
+		}).Error(new(PackageRequestError))
+		return nil, new(PackageRequestError)
+	}
+	var searchResult SearchPackageResult
+	err = json.Unmarshal(respBody, &searchResult)
+	if err != nil {
+		c.log.WithField("error", err.Error()).Error(new(PackageRequestError))
+		return nil, err
+	}
+	return &searchResult, nil
 }

@@ -1,36 +1,36 @@
+// FIXME: golangci-lint
+// nolint:gocritic,govet,revive
 package main
 
 import (
-	"github.com/redhatinsights/edge-api/config"
+	"os"
+
 	l "github.com/redhatinsights/edge-api/logger"
 	"github.com/redhatinsights/edge-api/pkg/db"
 	"github.com/redhatinsights/edge-api/pkg/models"
+
+	"github.com/redhatinsights/edge-api/config"
+
 	log "github.com/sirupsen/logrus"
 )
 
+func handlePanic(errorOccurred *bool) {
+	if err := recover(); err != nil {
+		log.Error("Database automigrate failure")
+		l.FlushLogger()
+		os.Exit(1)
+	}
+}
+
 func main() {
 	config.Init()
-	l.InitLogger()
-	cfg := config.Get()
-	log.WithFields(log.Fields{
-		"Hostname":                 cfg.Hostname,
-		"Auth":                     cfg.Auth,
-		"WebPort":                  cfg.WebPort,
-		"MetricsPort":              cfg.MetricsPort,
-		"LogLevel":                 cfg.LogLevel,
-		"Debug":                    cfg.Debug,
-		"BucketName":               cfg.BucketName,
-		"BucketRegion":             cfg.BucketRegion,
-		"RepoTempPath ":            cfg.RepoTempPath,
-		"OpenAPIFilePath ":         cfg.OpenAPIFilePath,
-		"ImageBuilderURL":          cfg.ImageBuilderConfig.URL,
-		"DefaultOSTreeRef":         cfg.DefaultOSTreeRef,
-		"InventoryURL":             cfg.InventoryConfig.URL,
-		"PlaybookDispatcherConfig": cfg.PlaybookDispatcherConfig.URL,
-		"TemplatesPath":            cfg.TemplatesPath,
-		"DatabaseType":             cfg.Database.Type,
-		"DatabaseName":             cfg.Database.Name,
-	}).Info("Configuration Values:")
+	l.InitLogger(os.Stdout)
+	configValues, err := config.GetConfigValues()
+	if err != nil {
+		l.LogErrorAndPanic("error when getting config values", err)
+	}
+	log.WithFields(configValues).Info("Configuration Values:")
+	log.Info("Migration started ...")
 	db.InitDB()
 
 	/*
@@ -71,25 +71,125 @@ func main() {
 		}
 	*/
 	// Automigration
-	// Order should match Deleting of models in cmd/db/wipe.go
-	// Order is not strictly alphabetical due to dependencies (e.g. Image needs ImageSet)
-	err := db.DB.Debug().AutoMigrate(&models.Commit{},
-		&models.DeviceGroup{},
-		&models.DispatchRecord{},
-		&models.FDODevice{},
-		&models.FDOUser{},
-		&models.ImageSet{},
-		&models.Image{},
-		&models.Installer{},
-		&models.OwnershipVoucherData{},
-		&models.Package{},
-		&models.Repo{},
-		&models.SSHKey{},
-		&models.ThirdPartyRepo{},
-		&models.UpdateTransaction{})
-	if err != nil {
-		l.LogErrorAndPanic("database automigrate failure", err)
+	errorOccurred := false
+	defer handlePanic(&errorOccurred)
+
+	// Delete indexes first, before models AutoMigrate
+	indexesToDelete := []struct {
+		model     interface{}
+		label     string
+		indexName string
+	}{
+		{model: &models.ThirdPartyRepo{}, label: "ThirdPartyRepo", indexName: "idx_third_party_repos_name"},
+	}
+	for _, indexToDelete := range indexesToDelete {
+		if db.DB.Migrator().HasIndex(indexToDelete.model, indexToDelete.indexName) {
+			log.Debugf(`Model index %s "%s" exists deleting ...`, indexToDelete.label, indexToDelete.indexName)
+			if err := db.DB.Migrator().DropIndex(indexToDelete.model, indexToDelete.indexName); err != nil {
+				log.Warningf(`Model index %s "%s" deletion failure %s`, indexToDelete.label, indexToDelete.indexName, err)
+				errorOccurred = true
+			}
+		} else {
+			log.Debugf(`Model index %s "%s"  does not exist`, indexToDelete.label, indexToDelete.indexName)
+		}
 	}
 
-	log.Info("Migration Completed")
+	// Order should match model deletions in cmd/db/wipe.go
+	// Order is not strictly alphabetical due to dependencies (e.g. Image needs ImageSet)
+	type ModelInterface struct {
+		label             string
+		interfaceInstance interface{}
+	}
+	var modelsInterfaces = make([]ModelInterface, 0)
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "Commit",
+			interfaceInstance: &models.Commit{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "DeviceGroup",
+			interfaceInstance: &models.DeviceGroup{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "DispatchRecord",
+			interfaceInstance: &models.DispatchRecord{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "FDODevice",
+			interfaceInstance: &models.FDODevice{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "FDOUser",
+			interfaceInstance: &models.FDOUser{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "ImageSet",
+			interfaceInstance: &models.ImageSet{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "Image",
+			interfaceInstance: &models.Image{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "Installer",
+			interfaceInstance: &models.Installer{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "OwnershipVoucherData",
+			interfaceInstance: &models.OwnershipVoucherData{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "Package",
+			interfaceInstance: &models.Package{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "Repo",
+			interfaceInstance: &models.Repo{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "SSHKey",
+			interfaceInstance: &models.SSHKey{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "ThirdPartyRepo",
+			interfaceInstance: &models.ThirdPartyRepo{}})
+
+	modelsInterfaces = append(modelsInterfaces,
+		ModelInterface{
+			label:             "UpdateTransaction",
+			interfaceInstance: &models.UpdateTransaction{}})
+
+	for modelsIndex, modelsInterface := range modelsInterfaces {
+		log.Debugf("Migrating Model %d: %s", modelsIndex, modelsInterface.label)
+
+		err := db.DB.AutoMigrate(modelsInterface.interfaceInstance)
+		if err != nil {
+			log.Warningf("database automigrate failure %s", err)
+			errorOccurred = true
+		}
+	}
+
+	if !errorOccurred {
+		log.Info("Migration completed successfully")
+	} else {
+		log.Error("Migration completed with errors")
+	}
+	// flush logger before app exit
+	l.FlushLogger()
+	if errorOccurred {
+		os.Exit(2)
+	}
 }

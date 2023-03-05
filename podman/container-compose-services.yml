@@ -1,0 +1,74 @@
+version: '2'
+
+# For local dev use during microservice dev
+# before use (from edge-api root)...
+#   export DEVDIR=$PWD
+#
+# to use (from edge-api root)...
+#   podman-compose -f podman/container-compose-services.yml up -d
+#   podman ps
+#   podman logs -f edge-api_edge-api-images-build_1
+#   podman-compose -f podman/container-compose-services.yml down
+#
+secrets:
+  edgemgmt_config:
+    file: $PWD/podman/env/edgemgmt_config.json
+services:
+  edge-api-images-build:
+    container_name: edge-api-images-build
+    image: localhost/edge-api:localdev
+    restart: unless-stopped
+    privileged: true
+    env_file:
+      - env/edge-api.env
+    volumes:
+      - $PWD:/opt/app-root/src:z
+      - $HOME/go:/go
+      - $HOME/repos/:/tmp/repos:z
+    command: go run /opt/app-root/src/pkg/services/images_build/main.go
+    secrets:
+      - source: edgemgmt_config
+        target: /tmp/edgemgmt_config.json
+    depends_on:
+      - "kafka"
+      - "db"
+      - "edge-api-service"
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  edge-api-utility:
+    container_name: edge-api-utility
+    image: localhost/edge-api:localdev
+    restart: unless-stopped
+    privileged: true
+    env_file:
+      - env/edge-api.env
+#      depends-on: postgresql
+    volumes:
+      - $PWD:/opt/app-root/src:z
+      - $HOME/go:/go
+    #working_dir: /opt/app-root/src
+    command: go run /opt/app-root/src/cmd/kafka/main.go
+    secrets:
+      - source: edgemgmt_config
+        target: /tmp/edgemgmt_config.json
+    deploy:
+      resources:
+        limits:
+          memory: 500M
+
+#    edge-api-images-iso:
+#      image: localhost/edge-api:localdev
+#      restart: unless-stopped
+#      volumes:
+#        - $DEVDIR:/opt/app-root/src:z
+#      command: go run /opt/app-root/src/pkg/services/images_iso/main.go
+
+#    edge-api-images-status:
+#      image: localhost/edge-api:localdev
+#      restart: unless-stopped
+#      volumes:
+#        - $DEVDIR:/opt/app-root/src:z
+#      command: go run /opt/app-root/src/pkg/services/images_status/main.go

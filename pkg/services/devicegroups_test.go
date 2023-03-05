@@ -1,3 +1,5 @@
+// FIXME: golangci-lint
+// nolint:errcheck,gosec,govet,revive,typecheck
 package services_test
 
 import (
@@ -29,36 +31,41 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 
 	Context("creation of duplicated DeviceGroup name", func() {
 		account := common.DefaultAccount
+		orgID := common.DefaultOrgID
 		It("should fail to create a DeviceGroup with duplicated name", func() {
 			deviceGroupName := faker.Name()
-			deviceGroup, err := deviceGroupsService.CreateDeviceGroup(&models.DeviceGroup{Name: deviceGroupName, Account: account, Type: models.DeviceGroupTypeDefault})
+			deviceGroup, err := deviceGroupsService.CreateDeviceGroup(&models.DeviceGroup{Name: deviceGroupName, Account: account, OrgID: orgID, Type: models.DeviceGroupTypeDefault})
 			Expect(err).To(BeNil())
 			Expect(deviceGroup).NotTo(BeNil())
 
-			_, err = deviceGroupsService.CreateDeviceGroup(&models.DeviceGroup{Name: deviceGroupName, Account: account, Type: models.DeviceGroupTypeDefault})
+			_, err = deviceGroupsService.CreateDeviceGroup(&models.DeviceGroup{Name: deviceGroupName, Account: account, OrgID: orgID, Type: models.DeviceGroupTypeDefault})
 			Expect(err).NotTo(BeNil())
 			Expect(err.Error()).To(Equal("device group already exists"))
 		})
 	})
 	Context("deletion of DeviceGroup", func() {
 		account := common.DefaultAccount
+		orgID := common.DefaultOrgID
 		deviceGroupName := faker.Name()
 		devices := []models.Device{
 			{
 				Name:    faker.Name(),
 				UUID:    faker.UUIDHyphenated(),
 				Account: account,
+				OrgID:   orgID,
 			},
 			{
 				Name:    faker.Name(),
 				UUID:    faker.UUIDHyphenated(),
 				Account: account,
+				OrgID:   orgID,
 			},
 		}
 		deviceGroup := &models.DeviceGroup{
 			Name:    deviceGroupName,
 			Type:    models.DeviceGroupTypeDefault,
 			Account: account,
+			OrgID:   orgID,
 			Devices: devices,
 		}
 		It("should create a DeviceGroup", func() {
@@ -95,6 +102,8 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 	Context("adding devices to DeviceGroup", func() {
 		account1 := faker.UUIDHyphenated()
 		account2 := faker.UUIDHyphenated()
+		orgID1 := faker.UUIDHyphenated()
+		orgID2 := faker.UUIDHyphenated()
 		deviceGroupName1 := faker.Name()
 		deviceGroupName2 := faker.Name()
 		devices := []models.Device{
@@ -102,21 +111,24 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 				Name:    faker.Name(),
 				UUID:    faker.UUIDHyphenated(),
 				Account: account1,
+				OrgID:   orgID1,
 			},
 			{
 				Name:    faker.Name(),
 				UUID:    faker.UUIDHyphenated(),
 				Account: account1,
+				OrgID:   orgID1,
 			},
 			{
 				Name:    faker.Name(),
 				UUID:    faker.UUIDHyphenated(),
 				Account: account2,
+				OrgID:   orgID2,
 			},
 		}
 		deviceGroups := []models.DeviceGroup{
-			{Name: deviceGroupName1, Account: account1, Type: models.DeviceGroupTypeDefault},
-			{Name: deviceGroupName2, Account: account2, Type: models.DeviceGroupTypeDefault},
+			{Name: deviceGroupName1, Account: account1, OrgID: orgID1, Type: models.DeviceGroupTypeDefault},
+			{Name: deviceGroupName2, Account: account2, OrgID: orgID2, Type: models.DeviceGroupTypeDefault},
 		}
 		It("should create DeviceGroups", func() {
 			for _, device := range devices {
@@ -136,19 +148,19 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 			dbResult = db.DB.Where("name = ?", deviceGroupName1).First(&deviceGroup1)
 			Expect(dbResult.Error).To(BeNil())
 
-			addedDevices, err := deviceGroupsService.AddDeviceGroupDevices(account1, deviceGroup1.ID, devices)
+			addedDevices, err := deviceGroupsService.AddDeviceGroupDevices(orgID1, deviceGroup1.ID, devices)
 			Expect(err).To(BeNil())
 			Expect(len(*addedDevices)).To(Equal(2))
 		})
 		When("re-adding devices", func() {
 			It("should not return an error", func() {
-				_, err := deviceGroupsService.AddDeviceGroupDevices(account1, deviceGroup1.ID, devices)
+				_, err := deviceGroupsService.AddDeviceGroupDevices(orgID1, deviceGroup1.ID, devices)
 				Expect(err).To(BeNil())
 			})
 		})
 		When("adding empty devices", func() {
 			It("should fail", func() {
-				_, err := deviceGroupsService.AddDeviceGroupDevices(account1, deviceGroup1.ID, []models.Device{})
+				_, err := deviceGroupsService.AddDeviceGroupDevices(orgID1, deviceGroup1.ID, []models.Device{})
 				Expect(err).NotTo(BeNil())
 				expectedErr := services.DeviceGroupDevicesNotSupplied{}
 				Expect(err.Error()).To(Equal(expectedErr.Error()))
@@ -159,10 +171,10 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 				var fakeDevice models.Device
 				err := faker.FakeData(&fakeDevice)
 				Expect(err).To(BeNil())
-				devices, err := deviceGroupsService.AddDeviceGroupDevices(account1, deviceGroup1.ID, []models.Device{devices[0], fakeDevice})
+				devices, err := deviceGroupsService.AddDeviceGroupDevices(orgID1, deviceGroup1.ID, []models.Device{devices[0], fakeDevice})
 				Expect(devices).To(BeNil())
 				Expect(err).NotTo(BeNil())
-				expectedErr := services.DeviceGroupAccountDevicesNotFound{}
+				expectedErr := services.DeviceGroupOrgIDDevicesNotFound{}
 				Expect(err.Error()).To(Equal(expectedErr.Error()))
 			})
 		})
@@ -171,26 +183,26 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 				var fakeDevice models.Device
 				err := faker.FakeData(&fakeDevice)
 				Expect(err).To(BeNil())
-				devices, err := deviceGroupsService.AddDeviceGroupDevices(account1, deviceGroup1.ID, []models.Device{fakeDevice})
+				devices, err := deviceGroupsService.AddDeviceGroupDevices(orgID1, deviceGroup1.ID, []models.Device{fakeDevice})
 				Expect(devices).To(BeNil())
 				Expect(err).NotTo(BeNil())
-				expectedErr := services.DeviceGroupAccountDevicesNotFound{}
+				expectedErr := services.DeviceGroupOrgIDDevicesNotFound{}
 				Expect(err.Error()).To(Equal(expectedErr.Error()))
 			})
 		})
-		When("adding with empty account", func() {
+		When("adding with empty account and empty orgID", func() {
 			It("should fail", func() {
 				_, err := deviceGroupsService.AddDeviceGroupDevices("", deviceGroup1.ID, devices)
 				Expect(err).NotTo(BeNil())
-				expectedErr := services.DeviceGroupAccountOrIDUndefined{}
+				expectedErr := services.DeviceGroupMandatoryFieldsUndefined{}
 				Expect(err.Error()).To(Equal(expectedErr.Error()))
 			})
 		})
 		When("adding with empty DeviceGroup ID", func() {
 			It("should fail", func() {
-				_, err := deviceGroupsService.AddDeviceGroupDevices(account1, 0, devices)
+				_, err := deviceGroupsService.AddDeviceGroupDevices(orgID1, 0, devices)
 				Expect(err).NotTo(BeNil())
-				expectedErr := services.DeviceGroupAccountOrIDUndefined{}
+				expectedErr := services.DeviceGroupMandatoryFieldsUndefined{}
 				Expect(err.Error()).To(Equal(expectedErr.Error()))
 			})
 		})
@@ -200,9 +212,21 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 				dbResult := db.DB.Where("account in (?)", []string{account1, account2}).Find(&devicesFromDB)
 				Expect(dbResult.Error).To(BeNil())
 
-				_, err := deviceGroupsService.AddDeviceGroupDevices(account1, deviceGroup1.ID, devicesFromDB)
+				_, err := deviceGroupsService.AddDeviceGroupDevices(orgID1, deviceGroup1.ID, devicesFromDB)
 				Expect(err).NotTo(BeNil())
-				expectedErr := services.DeviceGroupAccountDevicesNotFound{}
+				expectedErr := services.DeviceGroupOrgIDDevicesNotFound{}
+				Expect(err.Error()).To(Equal(expectedErr.Error()))
+			})
+		})
+		When("adding devices with wrong orgID", func() {
+			It("should fail", func() {
+				var devicesFromDB []models.Device
+				dbResult := db.DB.Where("org_id in (?)", []string{orgID1, orgID2}).Find(&devicesFromDB)
+				Expect(dbResult.Error).To(BeNil())
+
+				_, err := deviceGroupsService.AddDeviceGroupDevices(orgID1, deviceGroup1.ID, devicesFromDB)
+				Expect(err).NotTo(BeNil())
+				expectedErr := services.DeviceGroupOrgIDDevicesNotFound{}
 				Expect(err.Error()).To(Equal(expectedErr.Error()))
 			})
 		})
@@ -213,33 +237,42 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 		It("should return account from context without error", func() {
 			Expect(err).To(BeNil())
 		})
+		orgID, err := common.GetOrgIDFromContext(ctx)
+		It("should return orgID from context without error", func() {
+			Expect(err).To(BeNil())
+		})
 		deviceGroupName := faker.Name()
 		devices := []models.Device{
 			{
 				Name:    faker.Name(),
 				UUID:    faker.UUIDHyphenated(),
 				Account: account,
+				OrgID:   orgID,
 			},
 			{
 				Name:    faker.Name(),
 				UUID:    faker.UUIDHyphenated(),
 				Account: account,
+				OrgID:   orgID,
 			},
 			{
 				Name:    faker.Name(),
 				UUID:    faker.UUIDHyphenated(),
 				Account: account,
+				OrgID:   orgID,
 			},
 			{
 				Name:    faker.Name(),
 				UUID:    faker.UUIDHyphenated(),
 				Account: account,
+				OrgID:   orgID,
 			},
 		}
 		deviceGroup := &models.DeviceGroup{
 			Name:    deviceGroupName,
 			Type:    models.DeviceGroupTypeDefault,
 			Account: account,
+			OrgID:   orgID,
 			Devices: devices,
 		}
 
@@ -262,7 +295,7 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 			// delete the first device
 			var deletedDeviceID uint
 			It("should remove device from device-group", func() {
-				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(account, deviceGroupID, []models.Device{savedDeviceGroup.Devices[0]})
+				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(orgID, deviceGroupID, []models.Device{savedDeviceGroup.Devices[0]})
 				Expect(delErr).To(BeNil())
 				Expect(deletedDevices).NotTo(BeNil())
 				Expect(len(*deletedDevices) > 0).To(BeTrue())
@@ -288,12 +321,12 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 				Expect(deletedDevicesIDS).To(BeEmpty())
 			})
 
-			It("should not delete non exsiting device from device-group", func() {
+			It("should not delete non existing device from device-group", func() {
 				var fakeDevice models.Device
 				err := faker.FakeData(&fakeDevice)
 				Expect(err).To(BeNil())
 
-				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(account, deviceGroupID, []models.Device{fakeDevice})
+				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(orgID, deviceGroupID, []models.Device{fakeDevice})
 				Expect(delErr).NotTo(BeNil())
 				Expect(delErr.Error()).To(Equal(new(services.DeviceGroupDevicesNotFound).Error()))
 				Expect(deletedDevices).To(BeNil())
@@ -301,7 +334,7 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 
 			// delete the multiple devices at once
 			It("should remove multiple devices from device-group", func() {
-				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(account, deviceGroupID, savedDeviceGroup.Devices[1:3])
+				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(orgID, deviceGroupID, savedDeviceGroup.Devices[1:3])
 				Expect(delErr).To(BeNil())
 				Expect(deletedDevices).NotTo(BeNil())
 				Expect(len(*deletedDevices) > 0).To(BeTrue())
@@ -314,7 +347,7 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 				err := faker.FakeData(&fakeDevice)
 				Expect(err).To(BeNil())
 
-				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(account, deviceGroupID, []models.Device{savedDeviceGroup.Devices[3], fakeDevice})
+				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(orgID, deviceGroupID, []models.Device{savedDeviceGroup.Devices[3], fakeDevice})
 				Expect(delErr).NotTo(BeNil())
 				Expect(delErr.Error()).To(Equal(new(services.DeviceGroupDevicesNotFound).Error()))
 				Expect(deletedDevices).To(BeNil())
@@ -326,9 +359,9 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 				err = faker.FakeData(&fakeDeviceGroup)
 				Expect(err).To(BeNil())
 				fakeDeviceGroup.Devices = []models.Device{savedDeviceGroup.Devices[0]}
-				Expect(db.DB.Create(&fakeDeviceGroup).Error).To(BeNil())
+				Expect(db.DB.Omit("Devices.*").Create(&fakeDeviceGroup).Error).To(BeNil())
 
-				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(account, deviceGroupID, fakeDeviceGroup.Devices)
+				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(orgID, deviceGroupID, fakeDeviceGroup.Devices)
 				Expect(delErr).NotTo(BeNil())
 				Expect(delErr.Error()).To(Equal(new(services.DeviceGroupDevicesNotFound).Error()))
 				Expect(deletedDevices).To(BeNil())
@@ -344,37 +377,81 @@ var _ = Describe("DeviceGroupsService basic functions", func() {
 				err = faker.FakeData(&fakeDeviceGroup)
 				Expect(err).To(BeNil())
 				fakeDeviceGroup.Devices = []models.Device{savedDeviceGroup.Devices[0], fakeDevice}
-				Expect(db.DB.Create(&fakeDeviceGroup).Error).To(BeNil())
+				Expect(db.DB.Omit("Devices.*").Create(&fakeDeviceGroup).Error).To(BeNil())
 
-				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(account, deviceGroupID, fakeDeviceGroup.Devices)
+				deletedDevices, delErr := deviceGroupsService.DeleteDeviceGroupDevices(orgID, deviceGroupID, fakeDeviceGroup.Devices)
 				Expect(delErr).NotTo(BeNil())
 				Expect(delErr.Error()).To(Equal(new(services.DeviceGroupDevicesNotFound).Error()))
 				Expect(deletedDevices).To(BeNil())
 			})
 
 			It("should return error when device does not exist in device-group", func() {
-				_, err := deviceGroupsService.DeleteDeviceGroupDevices(account, deviceGroupID, []models.Device{savedDeviceGroup.Devices[0]})
+				_, err := deviceGroupsService.DeleteDeviceGroupDevices(orgID, deviceGroupID, []models.Device{savedDeviceGroup.Devices[0]})
 				Expect(err).ToNot(BeNil())
 				Expect(err.Error()).To(Equal("devices not found in device group"))
 			})
 
-			It("should return error when account is undefined", func() {
-				_, err := deviceGroupsService.DeleteDeviceGroupDevices("", deviceGroupID, []models.Device{savedDeviceGroup.Devices[0]})
-				Expect(err).ToNot(BeNil())
-				Expect(err.Error()).To(Equal("account or deviceGroupID undefined"))
-			})
-
 			It("should return error when deviceGroupId is undefined", func() {
-				_, err := deviceGroupsService.DeleteDeviceGroupDevices(account, 0, []models.Device{savedDeviceGroup.Devices[0]})
+				_, err := deviceGroupsService.DeleteDeviceGroupDevices(orgID, 0, []models.Device{savedDeviceGroup.Devices[0]})
 				Expect(err).ToNot(BeNil())
-				Expect(err.Error()).To(Equal("account or deviceGroupID undefined"))
+				Expect(err.Error()).To(Equal("device group mandatory field are undefined"))
 
 			})
 
 			It("should return error when devices not supplied", func() {
-				_, err := deviceGroupsService.DeleteDeviceGroupDevices(account, deviceGroupID, []models.Device{})
+				_, err := deviceGroupsService.DeleteDeviceGroupDevices(orgID, deviceGroupID, []models.Device{})
 				Expect(err).ToNot(BeNil())
 				Expect(err.Error()).To(Equal("devices must be supplied to be added to or removed from device group"))
+			})
+		})
+	})
+	Context("Create DeviceGroup with 2 Devices that has same Image", func() {
+		orgID := faker.UUIDHyphenated()
+		deviceGroupName := faker.Name()
+		commit := models.Commit{OrgID: orgID, OSTreeCommit: faker.UUIDHyphenated(), ChangesRefs: true}
+		db.DB.Create(&commit)
+		imageSet1 := models.ImageSet{OrgID: orgID, Name: faker.Name(), Version: 3}
+		db.DB.Create(&imageSet1)
+		image := models.Image{Name: faker.Name(), OrgID: orgID, CommitID: commit.ID, ImageSetID: &imageSet1.ID, Status: models.ImageStatusSuccess, Distribution: "rhel-90"}
+		db.DB.Create(&image)
+
+		devices := []models.Device{
+			{
+				Name:    faker.Name(),
+				UUID:    faker.UUIDHyphenated(),
+				OrgID:   orgID,
+				ImageID: image.ID,
+			},
+			{
+				Name:    faker.Name(),
+				UUID:    faker.UUIDHyphenated(),
+				OrgID:   orgID,
+				ImageID: image.ID,
+			},
+		}
+		db.DB.Create(&devices)
+		deviceGroup := models.DeviceGroup{
+			Name:    deviceGroupName,
+			OrgID:   orgID,
+			Type:    models.DeviceGroupTypeDefault,
+			Devices: devices,
+		}
+		When("Create DeviceGroup with 2 Devices that has same Image", func() {
+			It("check that image appear once under DeviceImageInfo", func() {
+				res := db.DB.Omit("Devices.*").Create(&deviceGroup)
+				Expect(res.Error).To(BeNil())
+				Expect(deviceGroup.ID).NotTo(Equal(0))
+				re, err := deviceGroupsService.GetDeviceGroups(orgID, 100, 0, db.DB)
+				Expect(err).To(BeNil())
+				Expect(re).ToNot(BeNil())
+				Expect(*re).ToNot(BeEmpty())
+				result := (*re)[0].DeviceImageInfo
+				Expect(result).ToNot(BeNil())
+				Expect(len(*result)).To(Equal(1))
+				Expect((*result)[0].Name).To(Equal(image.Name))
+				Expect((*result)[0].Distribution).To(Equal(image.Distribution))
+				Expect((*result)[0].Version).To(Equal(image.Version))
+				Expect((*result)[0].CreatedAt).ToNot(BeNil())
 			})
 		})
 	})

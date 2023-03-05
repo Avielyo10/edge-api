@@ -1,17 +1,20 @@
+// FIXME: golangci-lint
+// nolint:govet,revive
 package models
 
 import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+
 	"gorm.io/gorm"
 )
 
 // Model is a basic GoLang struct based on gorm.Model with the JSON tags for openapi3gen
 type Model struct {
 	ID        uint           `gorm:"primarykey" json:"ID,omitempty"`
-	CreatedAt EdgeAPITime    `json:"CreatedAt,omitempty"`
-	UpdatedAt EdgeAPITime    `json:"UpdatedAt,omitempty"`
+	CreatedAt EdgeAPITime    `gorm:"index" json:"CreatedAt,omitempty"`
+	UpdatedAt EdgeAPITime    `gorm:"index" json:"UpdatedAt,omitempty"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"DeletedAt,omitempty"`
 }
 

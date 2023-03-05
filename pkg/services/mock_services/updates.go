@@ -36,6 +36,36 @@ func (m *MockUpdateServiceInterface) EXPECT() *MockUpdateServiceInterfaceMockRec
 	return m.recorder
 }
 
+// BuildUpdateRepo mocks base method.
+func (m *MockUpdateServiceInterface) BuildUpdateRepo(orgID string, updateID uint) (*models.UpdateTransaction, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "BuildUpdateRepo", orgID, updateID)
+	ret0, _ := ret[0].(*models.UpdateTransaction)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// BuildUpdateRepo indicates an expected call of BuildUpdateRepo.
+func (mr *MockUpdateServiceInterfaceMockRecorder) BuildUpdateRepo(orgID, updateID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BuildUpdateRepo", reflect.TypeOf((*MockUpdateServiceInterface)(nil).BuildUpdateRepo), orgID, updateID)
+}
+
+// BuildUpdateTransactions mocks base method.
+func (m *MockUpdateServiceInterface) BuildUpdateTransactions(devicesUpdate *models.DevicesUpdate, orgID string, commit *models.Commit) (*[]models.UpdateTransaction, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "BuildUpdateTransactions", devicesUpdate, orgID, commit)
+	ret0, _ := ret[0].(*[]models.UpdateTransaction)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// BuildUpdateTransactions indicates an expected call of BuildUpdateTransactions.
+func (mr *MockUpdateServiceInterfaceMockRecorder) BuildUpdateTransactions(devicesUpdate, orgID, commit interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BuildUpdateTransactions", reflect.TypeOf((*MockUpdateServiceInterface)(nil).BuildUpdateTransactions), devicesUpdate, orgID, commit)
+}
+
 // CreateUpdate mocks base method.
 func (m *MockUpdateServiceInterface) CreateUpdate(id uint) (*models.UpdateTransaction, error) {
 	m.ctrl.T.Helper()
@@ -49,6 +79,18 @@ func (m *MockUpdateServiceInterface) CreateUpdate(id uint) (*models.UpdateTransa
 func (mr *MockUpdateServiceInterfaceMockRecorder) CreateUpdate(id interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateUpdate", reflect.TypeOf((*MockUpdateServiceInterface)(nil).CreateUpdate), id)
+}
+
+// CreateUpdateAsync mocks base method.
+func (m *MockUpdateServiceInterface) CreateUpdateAsync(id uint) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "CreateUpdateAsync", id)
+}
+
+// CreateUpdateAsync indicates an expected call of CreateUpdateAsync.
+func (mr *MockUpdateServiceInterfaceMockRecorder) CreateUpdateAsync(id interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateUpdateAsync", reflect.TypeOf((*MockUpdateServiceInterface)(nil).CreateUpdateAsync), id)
 }
 
 // GetUpdatePlaybook mocks base method.
@@ -152,32 +194,47 @@ func (mr *MockUpdateServiceInterfaceMockRecorder) UpdateDevicesFromUpdateTransac
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateDevicesFromUpdateTransaction", reflect.TypeOf((*MockUpdateServiceInterface)(nil).UpdateDevicesFromUpdateTransaction), update)
 }
 
-// WriteTemplate mocks base method.
-func (m *MockUpdateServiceInterface) WriteTemplate(templateInfo services.TemplateRemoteInfo, account string) (string, error) {
+// ValidateUpdateDeviceGroup mocks base method.
+func (m *MockUpdateServiceInterface) ValidateUpdateDeviceGroup(orgID string, deviceGroupID uint) (bool, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "WriteTemplate", templateInfo, account)
+	ret := m.ctrl.Call(m, "ValidateUpdateDeviceGroup", orgID, deviceGroupID)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ValidateUpdateDeviceGroup indicates an expected call of ValidateUpdateDeviceGroup.
+func (mr *MockUpdateServiceInterfaceMockRecorder) ValidateUpdateDeviceGroup(orgID, deviceGroupID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ValidateUpdateDeviceGroup", reflect.TypeOf((*MockUpdateServiceInterface)(nil).ValidateUpdateDeviceGroup), orgID, deviceGroupID)
+}
+
+// ValidateUpdateSelection mocks base method.
+func (m *MockUpdateServiceInterface) ValidateUpdateSelection(orgID string, imageIds []uint) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ValidateUpdateSelection", orgID, imageIds)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ValidateUpdateSelection indicates an expected call of ValidateUpdateSelection.
+func (mr *MockUpdateServiceInterfaceMockRecorder) ValidateUpdateSelection(orgID, imageIds interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ValidateUpdateSelection", reflect.TypeOf((*MockUpdateServiceInterface)(nil).ValidateUpdateSelection), orgID, imageIds)
+}
+
+// WriteTemplate mocks base method.
+func (m *MockUpdateServiceInterface) WriteTemplate(templateInfo services.TemplateRemoteInfo, orgID string) (string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "WriteTemplate", templateInfo, orgID)
 	ret0, _ := ret[0].(string)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // WriteTemplate indicates an expected call of WriteTemplate.
-func (mr *MockUpdateServiceInterfaceMockRecorder) WriteTemplate(templateInfo, account interface{}) *gomock.Call {
+func (mr *MockUpdateServiceInterfaceMockRecorder) WriteTemplate(templateInfo, orgID interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteTemplate", reflect.TypeOf((*MockUpdateServiceInterface)(nil).WriteTemplate), templateInfo, account)
-}
-
-// ValidateUpdateSelection mocks base method
-func (m *MockUpdateServiceInterface) ValidateUpdateSelection(account string, imageIds []uint) (bool, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ValidateUpdateSelection", account, imageIds)
-	ret0, _ := ret[0].(bool)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// ValidateUpdateSelection mock
-func (mr *MockUpdateServiceInterfaceMockRecorder) ValidateUpdateSelection(account string, imageIds []uint) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendDeviceNotification", reflect.TypeOf((*MockUpdateServiceInterface)(nil).ValidateUpdateSelection), account, imageIds)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteTemplate", reflect.TypeOf((*MockUpdateServiceInterface)(nil).WriteTemplate), templateInfo, orgID)
 }

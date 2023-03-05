@@ -1,11 +1,17 @@
+// FIXME: golangci-lint
+// nolint:gosimple,govet,revive,unused
 package models
 
 import (
 	"errors"
 	"regexp"
+	"strings"
 
 	"github.com/lib/pq"
-	"github.com/redhatinsights/edge-api/pkg/db"
+	log "github.com/sirupsen/logrus"
+	"gorm.io/gorm"
+
+	"github.com/redhatinsights/edge-api/config"
 )
 
 // ImageSet represents a collection of images
@@ -14,6 +20,7 @@ type ImageSet struct {
 	Name    string  `json:"Name"`
 	Version int     `json:"Version" gorm:"default:1"`
 	Account string  `json:"Account"`
+	OrgID   string  `json:"org_id" gorm:"index;<-:create"`
 	Images  []Image `json:"Images"`
 }
 
@@ -22,6 +29,7 @@ type Image struct {
 	Model
 	Name                   string           `json:"Name"`
 	Account                string           `json:"Account"`
+	OrgID                  string           `json:"org_id" gorm:"index;<-:create"`
 	Distribution           string           `json:"Distribution"`
 	Description            string           `json:"Description"`
 	Status                 string           `json:"Status"`
@@ -36,11 +44,16 @@ type Image struct {
 	Packages               []Package        `json:"Packages,omitempty" gorm:"many2many:images_packages;"`
 	ThirdPartyRepositories []ThirdPartyRepo `json:"ThirdPartyRepositories,omitempty" gorm:"many2many:images_repos;"`
 	CustomPackages         []Package        `json:"CustomPackages,omitempty" gorm:"many2many:images_custom_packages"`
+	RequestID              string           `json:"request_id"` // storing for logging reference on resume
+
+	TotalDevicesWithImage int64 `json:"SystemsRunning" gorm:"-"` // only for forms
+	TotalPackages         int   `json:"TotalPackages" gorm:"-"`  // only for forms
 }
 
 // ImageUpdateAvailable contains image and differences between current and available commits
 type ImageUpdateAvailable struct {
 	Image       Image       `json:"Image"`
+	CanUpdate   bool        `json:"CanUpdate"`
 	PackageDiff PackageDiff `json:"PackageDiff"`
 }
 
@@ -55,6 +68,7 @@ type PackageDiff struct {
 type ImageInfo struct {
 	Image            Image                   `json:"Image"`
 	UpdatesAvailable *[]ImageUpdateAvailable `json:"UpdatesAvailable,omitempty"`
+	Count            int64                   `json:"Count"`
 	Rollback         *Image                  `json:"RollbackImage,omitempty"`
 }
 
@@ -67,7 +81,7 @@ const (
 	NameCantBeInvalidMessage = "name must start with alphanumeric characters and can contain underscore and hyphen characters"
 	// ImageTypeNotAccepted is the error message when an image type is not accepted
 	ImageTypeNotAccepted = "this image type is not accepted"
-	// ImageNameAlreadyExists is the error message when an image name alredy exists
+	// ImageNameAlreadyExists is the error message when an image name already exists
 	ImageNameAlreadyExists = "this image name is already in use"
 	// NoOutputTypes is the error message when the output types list is empty
 	NoOutputTypes = "an output type is required"
@@ -87,32 +101,64 @@ const (
 	ImageStatusSuccess = "SUCCESS"
 	// ImageStatusInterrupted is for when an image build is interrupted
 	ImageStatusInterrupted = "INTERRUPTED"
+	// ImageStatusPending is for when an image or installer is waiting to be built
+	ImageStatusPending = "PENDING"
 
 	// MissingInstaller is the error message for not passing an installer in the request
 	MissingInstaller = "installer info must be provided"
+	// MissingOrganizationId is the error message for not providing an org id in the request
+	MissingOrganizationId = "org_id must be provided"
 	// MissingUsernameError is the error message for not passing username in the request
 	MissingUsernameError = "username must be provided"
+	// ReservedUsernameError is the error message for passing a reserved username in the request
+	ReservedUsernameError = "username is reserved"
 	// MissingSSHKeyError is the error message when SSH Key is not given
 	MissingSSHKeyError = "SSH key must be provided"
 	// InvalidSSHKeyError is the error message for not supported or invalid ssh key format
 	InvalidSSHKeyError = "SSH Key supports RSA or DSS or ED25519 or ECDSA-SHA2 algorithms"
 )
 
+//
+
 // Required Packages to send to image builder that will go into the base image
-var requiredPackages = [6]string{
-	"ansible",
-	"rhc",
-	"rhc-worker-playbook",
-	"subscription-manager",
-	"subscription-manager-plugin-ostree",
-	"insights-client",
-}
+var requiredPackages = []string{}
 
 var (
 	validSSHPrefix     = regexp.MustCompile(`^(ssh-(rsa|dss|ed25519)|ecdsa-sha2-nistp(256|384|521)) \S+`)
 	validImageName     = regexp.MustCompile(`^[A-Za-z0-9]+[A-Za-z0-9\s_-]*$`)
 	acceptedImageTypes = map[string]interface{}{ImageTypeCommit: nil, ImageTypeInstaller: nil}
 )
+
+var reservedImageUsernames = []string{
+	"root", "bin", "daemon", "sys", "adm", "tty", "disk", "lp", "mem", "kmem", "wheel", "cdrom", "sync",
+	"shutdown", "halt", "mail", "news", "uucp", "operator", "games", "gopher", "ftp", "man", "oprofile", "pkiuser",
+	"dialout", "floppy", "games", "slocate", "utmp", "squid", "pvm", "named", "postgres", "mysql", "nscd",
+	"rpcuser", "console", "rpc", "amandabackup", "tape", "netdump", "utempter", "vdsm", "kvm", "rpm", "ntp",
+	"video", "dip", "mailman", "gdm", "xfs", "pppusers", "popusers", "slipusers", "mailnull", "apache", "wnn",
+	"smmsp", "puppet", "tomcat", "lock", "ldap", "frontpage", "nut", "beagleindex", "tss", "piranha", "prelude-manager",
+	"snortd", "audio", "condor", "nslcd", "wine", "pegasus", "webalizer", "haldaemon", "vcsa", "avahi",
+	"realtime", "tcpdump", "privoxy", "sshd", "radvd", "cyrus", "saslauth", "arpwatch", "fax", "nocpulse", "desktop",
+	"dbus", "jonas", "clamav", "screen", "quaggavt", "sabayon", "polkituser", "wbpriv", "postfix", "postdrop",
+	"majordomo", "quagga", "exim", "distcache", "radiusd", "hsqldb", "dovecot", "ident", "users", "qemu",
+	"ovirt", "rhevm", "jetty", "saned", "vhostmd", "usbmuxd", "bacula", "cimsrvr", "mock", "ricci",
+	"luci", "activemq", "cassandra", "stap-server", "stapusr", "stapsys", "stapdev", "swift", "glance", "nova",
+	"keystone", "quantum", "cinder", "ceilometer", "ceph", "avahi-autoipd", "pulse", "rtkit", "abrt",
+	"retrace", "ovirtagent", "ats", "dhcpd", "myproxy", "sanlock", "aeolus", "wallaby", "katello", "elasticsearch",
+	"mongodb", "wildfly", "jbosson-agent", "jbosson", "heat", "haproxy", "hacluster", "haclient", "systemd-journal",
+	"systemd-network", "systemd-resolve", "gnats", "listar", "nobody",
+}
+
+func validateImageUserName(username string) error {
+	if username == "" {
+		return errors.New(MissingUsernameError)
+	}
+	for _, reservedName := range reservedImageUsernames {
+		if strings.ToLower(username) == reservedName {
+			return errors.New(ReservedUsernameError)
+		}
+	}
+	return nil
+}
 
 // ValidateRequest validates an Image Request
 func (i *Image) ValidateRequest() error {
@@ -133,17 +179,13 @@ func (i *Image) ValidateRequest() error {
 			return errors.New(ImageTypeNotAccepted)
 		}
 	}
-	if i.Version == 1 && checkIfImageExist(i.Name) {
-		return errors.New(ImageNameAlreadyExists)
-	}
-
 	// Installer checks
 	if i.HasOutputType(ImageTypeInstaller) {
 		if i.Installer == nil {
 			return errors.New(MissingInstaller)
 		}
-		if i.Installer.Username == "" {
-			return errors.New(MissingUsernameError)
+		if err := validateImageUserName(i.Installer.Username); err != nil {
+			return err
 		}
 		if i.Installer.SSHKey == "" {
 			return errors.New(MissingSSHKeyError)
@@ -168,7 +210,19 @@ func (i *Image) HasOutputType(imageType string) bool {
 
 // GetPackagesList returns the packages in a user-friendly list containing their names
 func (i *Image) GetPackagesList() *[]string {
+
+	if i.Distribution == "" {
+		return nil
+	}
+
+	distributionPackage := config.DistributionsPackages[i.Distribution]
+
+	requiredPackages := make([]string, 0, len(distributionPackage)+len(config.RequiredPackages))
+	requiredPackages = append(requiredPackages, config.RequiredPackages...)
+	requiredPackages = append(requiredPackages, distributionPackage...)
+
 	l := len(requiredPackages)
+
 	pkgs := make([]string, len(i.Packages)+l)
 	for i, p := range requiredPackages {
 		pkgs[i] = p
@@ -179,25 +233,68 @@ func (i *Image) GetPackagesList() *[]string {
 	return &pkgs
 }
 
-//checkIfImageExist checks if name to image is already in use
-func checkIfImageExist(imageName string) bool {
-	var imageFindByName *Image
-	result := db.DB.Where("Name = ?", imageName).First(&imageFindByName)
-	if result.Error != nil {
-		return false
-	}
-	return imageFindByName != nil
-}
-
 // GetALLPackagesList returns all the packages including custom packages containing their names
 func (i *Image) GetALLPackagesList() *[]string {
-	initialPackages := *i.GetPackagesList()
-	packages := make([]string, 0, len(initialPackages)+len(i.CustomPackages))
+	packagesList := i.GetPackagesList()
+	if len(i.ThirdPartyRepositories) == 0 {
+		// ignore custom packages when custom repositories list is empty
+		return packagesList
+	}
+	var initialPackages []string
+	if packagesList != nil {
+		initialPackages = *packagesList
+	}
 
+	packages := make([]string, 0, len(initialPackages)+len(i.CustomPackages))
 	packages = append(packages, initialPackages...)
 
 	for _, pkg := range i.CustomPackages {
 		packages = append(packages, pkg.Name)
 	}
 	return &packages
+}
+
+// BeforeCreate method is called before creating Images, it make sure org_id is not empty
+func (i *Image) BeforeCreate(tx *gorm.DB) error {
+	if i.OrgID == "" {
+		log.Error(MissingOrganizationId)
+		return ErrOrgIDIsMandatory
+
+	}
+
+	return nil
+}
+
+// BeforeCreate method is called before creating ImageSet, it make sure org_id is not empty
+func (imgset *ImageSet) BeforeCreate(tx *gorm.DB) error {
+	if imgset.OrgID == "" {
+		log.Error(MissingOrganizationId)
+		return ErrOrgIDIsMandatory
+	}
+
+	return nil
+}
+
+// ImageSetView is the image-set row returned for ui image-sets display
+type ImageSetView struct {
+	ID               uint        `json:"ID"`
+	Name             string      `json:"Name"`
+	Version          int         `json:"Version"`
+	UpdatedAt        EdgeAPITime `json:"UpdatedAt"`
+	Status           string      `json:"Status"`
+	ImageBuildIsoURL string      `json:"ImageBuildIsoURL"`
+	ImageID          uint        `json:"ImageID"`
+}
+
+// ImageView is the image row returned for ui images-set display
+type ImageView struct {
+	ID               uint        `json:"ID"`
+	Name             string      `json:"Name"`
+	Version          int         `json:"Version"`
+	ImageType        string      `json:"ImageType"`
+	CommitCheckSum   string      `json:"CommitCheckSum"`
+	OutputTypes      []string    `json:"OutputTypes"`
+	CreatedAt        EdgeAPITime `json:"CreatedAt"`
+	Status           string      `json:"Status"`
+	ImageBuildIsoURL string      `json:"ImageBuildIsoURL"`
 }

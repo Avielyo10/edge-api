@@ -1,11 +1,14 @@
+// FIXME: golangci-lint
+// nolint:govet,revive,typecheck
 package models
 
 import (
 	"errors"
-	"github.com/bxcodec/faker/v3"
 	"testing"
 
+	"github.com/bxcodec/faker/v3"
 	"github.com/redhatinsights/edge-api/pkg/db"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestGroupValidateRequest(t *testing.T) {
@@ -14,11 +17,11 @@ func TestGroupValidateRequest(t *testing.T) {
 		group    *DeviceGroup
 		expected error
 	}{
-		{name: "Empty name", group: &DeviceGroup{Account: "111111", Type: "static"}, expected: errors.New(DeviceGroupNameEmptyErrorMessage)},
-		{name: "Invalid type", group: &DeviceGroup{Name: "test_group", Account: "111111", Type: "invalid type"}, expected: errors.New(DeviceGroupTypeInvalidErrorMessage)},
-		{name: "Invalid name", group: &DeviceGroup{Name: "** test group", Account: "111111", Type: DeviceGroupTypeDefault}, expected: errors.New(DeviceGroupNameInvalidErrorMessage)},
-		{name: "Empty account", group: &DeviceGroup{Name: "test_group", Type: "static"}, expected: errors.New(DeviceGroupAccountEmptyErrorMessage)},
-		{name: "Valid DeviceGroup", group: &DeviceGroup{Name: "test_group", Account: "111111", Type: DeviceGroupTypeDefault}, expected: nil},
+		{name: "Empty name", group: &DeviceGroup{OrgID: "111111", Type: "static"}, expected: errors.New(DeviceGroupNameEmptyErrorMessage)},
+		{name: "Invalid type", group: &DeviceGroup{Name: "test_group", OrgID: "111111", Type: "invalid type"}, expected: errors.New(DeviceGroupTypeInvalidErrorMessage)},
+		{name: "Invalid name", group: &DeviceGroup{Name: "** test group", OrgID: "111111", Type: DeviceGroupTypeDefault}, expected: errors.New(DeviceGroupNameInvalidErrorMessage)},
+		{name: "Empty orgID", group: &DeviceGroup{Name: "test_group", OrgID: "", Type: "static"}, expected: errors.New(DeviceGroupOrgIDEmptyErrorMessage)},
+		{name: "Valid DeviceGroup", group: &DeviceGroup{Name: "test_group", OrgID: "111111", Type: DeviceGroupTypeDefault}, expected: nil},
 	}
 
 	for _, testScenario := range testScenarios {
@@ -36,16 +39,15 @@ func TestGroupValidateRequest(t *testing.T) {
 }
 
 func TestGroupCreateUpdateConstraint(t *testing.T) {
-	groupInitialAccount := "111111"
+	groupInitialAccount := "1111111"
 	groupInitialName := "test_group"
 	groupInitialType := DeviceGroupTypeDynamic
+	groupNewOrgID := "222222"
+	groupInitialOrgID := "1111111"
 
-	groupNewAccount := "222222"
 	groupNewType := DeviceGroupTypeStatic
 	groupNewName := "new_test_group"
-
-	group := DeviceGroup{Name: groupInitialName, Account: groupInitialAccount, Type: groupInitialType}
-
+	group := DeviceGroup{Name: groupInitialName, Account: groupInitialAccount, OrgID: groupInitialOrgID, Type: groupInitialType}
 	err := group.ValidateRequest()
 	if err != nil {
 		t.Errorf("Failed to pass validation, Error: %q", err)
@@ -59,10 +61,10 @@ func TestGroupCreateUpdateConstraint(t *testing.T) {
 	var savedGroup DeviceGroup
 	result = db.DB.First(&savedGroup, group.ID)
 	if result.Error != nil {
-		t.Errorf("Failed to retreive the created DeviceGroup: %q", result.Error)
+		t.Errorf("Failed to retrieve the created DeviceGroup: %q", result.Error)
 	}
 
-	savedGroup.Account = groupNewAccount
+	savedGroup.OrgID = groupNewOrgID
 	savedGroup.Type = groupNewType
 	savedGroup.Name = groupNewName
 
@@ -74,11 +76,11 @@ func TestGroupCreateUpdateConstraint(t *testing.T) {
 	var updatedGroup DeviceGroup
 	result = db.DB.First(&updatedGroup, group.ID)
 	if result.Error != nil {
-		t.Errorf("Failed to retreive the updated DeviceGroup: %q", result.Error)
+		t.Errorf("Failed to retrieve the updated DeviceGroup: %q", result.Error)
 	}
 	// The group Account should not be updated
-	if updatedGroup.Account != groupInitialAccount {
-		t.Errorf("The group Account has been updated expected: %q  but found %q", groupInitialAccount, updatedGroup.Account)
+	if updatedGroup.OrgID != groupInitialOrgID {
+		t.Errorf("The org id has been updated expected: %q  but found %q", groupInitialOrgID, updatedGroup.OrgID)
 	}
 	// The group Type should not be updated
 	if updatedGroup.Type != groupInitialType {
@@ -91,6 +93,7 @@ func TestGroupCreateUpdateConstraint(t *testing.T) {
 }
 
 func TestBeforeDelete(t *testing.T) {
+	orgID := faker.UUIDHyphenated()
 	account := faker.UUIDHyphenated()
 	deviceGroupName := faker.Name()
 	devices := []Device{
@@ -98,17 +101,20 @@ func TestBeforeDelete(t *testing.T) {
 			Name:    faker.Name(),
 			UUID:    faker.UUIDHyphenated(),
 			Account: account,
+			OrgID:   orgID,
 		},
 		{
 			Name:    faker.Name(),
 			UUID:    faker.UUIDHyphenated(),
 			Account: account,
+			OrgID:   orgID,
 		},
 	}
 	deviceGroup := &DeviceGroup{
 		Name:    deviceGroupName,
 		Type:    DeviceGroupTypeDefault,
 		Account: account,
+		OrgID:   orgID,
 		Devices: devices,
 	}
 	// Create the DeviceGroup
@@ -136,5 +142,49 @@ func TestBeforeDelete(t *testing.T) {
 	}
 	if len(deviceGroup.Devices) != 0 {
 		t.Errorf("Expected 0 devices but found %d: %v", len(deviceGroup.Devices), deviceGroup.Devices)
+	}
+}
+
+func TestDeviceGroupsBeforeCreate(t *testing.T) {
+	orgID := faker.UUIDHyphenated()
+	account := faker.UUIDHyphenated()
+	deviceGroupNameWithOrgID := faker.Name()
+	devices := []Device{
+		{
+			Name:    faker.Name(),
+			UUID:    faker.UUIDHyphenated(),
+			OrgID:   orgID,
+			Account: account,
+		},
+	}
+
+	cases := []struct {
+		Name     string
+		Input    DeviceGroup
+		Expected error
+	}{
+		{
+			"Missing orgID",
+			DeviceGroup{},
+			ErrOrgIDIsMandatory,
+		},
+		{
+			"Can be created",
+			DeviceGroup{
+				Name:    deviceGroupNameWithOrgID,
+				Type:    DeviceGroupTypeDefault,
+				OrgID:   orgID,
+				Account: account,
+				Devices: devices,
+			},
+			nil,
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.Name, func(t *testing.T) {
+			got := test.Input.BeforeCreate(db.DB)
+			assert.Equal(t, test.Expected, got)
+		})
 	}
 }

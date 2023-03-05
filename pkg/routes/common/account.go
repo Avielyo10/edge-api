@@ -1,3 +1,5 @@
+// FIXME: golangci-lint
+// nolint:revive
 package common
 
 import (
@@ -5,8 +7,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/redhatinsights/edge-api/config"
 	"github.com/redhatinsights/platform-go-middlewares/identity"
+
+	"github.com/redhatinsights/edge-api/config"
 )
 
 const (

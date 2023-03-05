@@ -2,6 +2,11 @@
 
 set -exv
 
+export GOROOT="/opt/go/1.17.7" # Force Jenkins to use Go 1.17.7 since we don't have 1.18 yet
+export PATH="${GOROOT}/bin:${PATH}"
+
+export PR_CHECK="false" # Only used when doing a PR check from Github.
+
 IMAGE="quay.io/cloudservices/edge-api"
 
 # Determine Git commit hash (7 hex characters)
@@ -44,3 +49,12 @@ for tag in $(echo $TAGS); do
     podman tag "${IMAGE}:${IMAGE_TAG}" "${IMAGE}:${tag}"
     podman push "${IMAGE}:${tag}"
 done
+
+# Run coverage using same version of Go as the App
+podman run --user root --rm -i \
+    -v $PWD:/usr/src:z \
+    registry.access.redhat.com/ubi8/go-toolset:1.18.4-8 \
+    bash -c 'cd /usr/src && make coverage-no-fdo'
+
+# Generate sonarqube reports
+make scan_project

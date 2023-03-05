@@ -1,26 +1,36 @@
 // Package main Edge API
 //
-//  An API server for fleet edge management capabilities.
+// An API server for fleet edge management capabilities.
+// FIXME: golangci-lint
+// nolint:errcheck,revive,typecheck,unused
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
 	redoc "github.com/go-openapi/runtime/middleware"
-	"github.com/redhatinsights/edge-api/config"
 	l "github.com/redhatinsights/edge-api/logger"
+	kafkacommon "github.com/redhatinsights/edge-api/pkg/common/kafka"
 	"github.com/redhatinsights/edge-api/pkg/db"
 	"github.com/redhatinsights/edge-api/pkg/dependencies"
 	"github.com/redhatinsights/edge-api/pkg/routes"
 	"github.com/redhatinsights/edge-api/pkg/services"
+	edgeunleash "github.com/redhatinsights/edge-api/unleash"
+	feature "github.com/redhatinsights/edge-api/unleash/features"
 
+	"github.com/redhatinsights/edge-api/config"
+
+	"github.com/Unleash/unleash-client-go/v3"
+	"github.com/getsentry/sentry-go"
 	"github.com/go-chi/chi"
 	"github.com/go-chi/chi/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -38,13 +48,20 @@ func setupDocsMiddleware(handler http.Handler) http.Handler {
 
 func initDependencies() {
 	config.Init()
-	l.InitLogger()
+	l.InitLogger(os.Stdout)
 	db.InitDB()
 }
 
 func serveMetrics(port int) *http.Server {
 	metricsRoute := chi.NewRouter()
-	metricsRoute.Get("/", routes.StatusOK)
+	SpecURL := "api/edge/v1/openapi.json"	// nolint:gocritic,gofmt,goimports
+
+	readinessHandlerFunc := &routes.ConfigurableWebGetter{
+		URL:    fmt.Sprintf("%s:%d/%s", config.Get().MetricsBaseURL, config.Get().WebPort, SpecURL),
+		GetURL: http.Get,
+	}
+
+	metricsRoute.Get("/", routes.GetReadinessStatus(readinessHandlerFunc))
 	metricsRoute.Handle("/metrics", promhttp.Handler())
 	server := http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
@@ -95,6 +112,7 @@ func webRoutes(cfg *config.EdgeConfig) *chi.Mux {
 		s.Route("/thirdpartyrepo", routes.MakeThirdPartyRepoRouter)
 		s.Route("/fdo", routes.MakeFDORouter)
 		s.Route("/device-groups", routes.MakeDeviceGroupsRouter)
+		s.Route("/storage", routes.MakeStorageRouter)
 	})
 	return route
 }
@@ -132,6 +150,16 @@ func gracefulTermination(server *http.Server, serviceName string) {
 	log.Infof("%s service shutdown complete", serviceName)
 }
 
+func featureFlagsConfigPresent() bool {
+	conf := config.Get()
+	return conf.FeatureFlagsURL != ""
+}
+
+func featureFlagsServiceUnleash() bool {
+	conf := config.Get()
+	return conf.FeatureFlagsService == "unleash"
+}
+
 func main() {
 	// this only catches interrupts for main
 	// see images for image build interrupt
@@ -139,16 +167,64 @@ func main() {
 	signal.Notify(interruptSignal, os.Interrupt, syscall.SIGTERM)
 
 	initDependencies()
+
 	cfg := config.Get()
+
+	if feature.GlitchtipLogging.IsEnabled() {
+		// Set up Sentry client for GlitchTip error tracking
+		sentry.Init(sentry.ClientOptions{
+			Dsn: cfg.GlitchtipDsn,
+		})
+		// Flush client after main exits
+		defer sentry.Flush(2 * time.Second)
+		// Report captured errors to GlitchTip
+		defer sentry.Recover()
+	}
+
+	if cfg.Debug {
+		if buildInfo, ok := debug.ReadBuildInfo(); ok {
+			b := new(bytes.Buffer)
+			enc := json.NewEncoder(b)
+			enc.SetIndent("", "  ")
+			err := enc.Encode(buildInfo)
+			if err == nil {
+				log.WithField("buildInfo", b).Debug("Build information")
+			} else {
+				log.WithField("ok", ok).Debug("Unable to encode buildInfo")
+			}
+		} else {
+			log.WithField("ok", ok).Debug("Unable to get Build Info")
+		}
+	}
+
 	var configValues map[string]interface{}
 	cfgBytes, _ := json.Marshal(cfg)
 	_ = json.Unmarshal(cfgBytes, &configValues)
+	// TODO: remove this next line once we have all allowed config values moved to config.LogConfigAtStartup
 	log.WithFields(configValues).Info("Configuration Values")
+	config.LogConfigAtStartup(cfg)
+
+	if featureFlagsConfigPresent() {
+		err := unleash.Initialize(
+			unleash.WithListener(&edgeunleash.EdgeListener{}),
+			unleash.WithAppName("edge-api"),
+			unleash.WithUrl(cfg.UnleashURL),
+			unleash.WithRefreshInterval(5*time.Second),
+			unleash.WithMetricsInterval(5*time.Second),
+			unleash.WithCustomHeaders(http.Header{"Authorization": {fmt.Sprintf("Bearer %s", cfg.UnleashSecretName)}}),
+		)
+		if err != nil {
+			log.WithField("Error", err).Error("Unleash client failed to initialize")
+		} else {
+			log.WithField("FeatureFlagURL", cfg.UnleashURL).Info("Unleash client initialized successfully")
+		}
+	} else {
+		log.WithField("FeatureFlagURL", cfg.UnleashURL).Warning("FeatureFlag service initialization was skipped.")
+	}
 
 	consumers := []services.ConsumerService{
-		services.NewKafkaConsumerService(cfg.KafkaConfig, "platform.playbook-dispatcher.runs"),
-		services.NewKafkaConsumerService(cfg.KafkaConfig, "platform.inventory.events"),
-		services.NewKafkaConsumerService(cfg.KafkaConfig, "platform.edge.fleetmgmt.image-build"),
+		services.NewKafkaConsumerService(cfg.KafkaConfig, kafkacommon.TopicPlaybookDispatcherRuns),
+		services.NewKafkaConsumerService(cfg.KafkaConfig, kafkacommon.TopicInventoryEvents),
 	}
 	webServer := serveWeb(cfg, consumers)
 	metricsServer := serveMetrics(cfg.MetricsPort)

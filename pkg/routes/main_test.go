@@ -1,3 +1,5 @@
+// FIXME: golangci-lint
+// nolint:errcheck,revive,typecheck
 package routes
 
 import (
@@ -6,9 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redhatinsights/edge-api/config"
+	"github.com/Unleash/unleash-client-go/v3"
 	"github.com/redhatinsights/edge-api/pkg/db"
 	"github.com/redhatinsights/edge-api/pkg/models"
+	"github.com/redhatinsights/edge-api/pkg/routes/common"
+	mockUnleash "github.com/redhatinsights/edge-api/unleash"
+	feature "github.com/redhatinsights/edge-api/unleash/features"
+	log "github.com/sirupsen/logrus"
+
+	"github.com/redhatinsights/edge-api/config"
 )
 
 var (
@@ -38,8 +46,10 @@ var (
 func TestMain(m *testing.M) {
 	setUp()
 	retCode := m.Run()
-	tearDown()
-	os.Exit(retCode)
+	defer func(exitCode int) {
+		tearDown()
+		os.Exit(exitCode)
+	}(retCode)
 }
 
 var dbName string
@@ -47,8 +57,7 @@ var dbName string
 func setUp() {
 	config.Init()
 	config.Get().Debug = true
-	time := time.Now().UnixNano()
-	dbName = fmt.Sprintf("%d-routes.db", time)
+	dbName = fmt.Sprintf("%d-routes.db", time.Now().UnixNano())
 	config.Get().Database.Name = dbName
 	db.InitDB()
 	err := db.DB.AutoMigrate(
@@ -70,9 +79,15 @@ func setUp() {
 		Account: "0000000",
 		Status:  models.ImageStatusBuilding,
 		Commit: &models.Commit{
+			OrgID:  common.DefaultOrgID,
 			Status: models.ImageStatusBuilding,
+			InstalledPackages: []models.InstalledPackage{
+				{Name: "vim"},
+			},
 		},
-		Name: "Image Name in DB",
+		Name:                  "Image Name in DB",
+		TotalDevicesWithImage: 5,
+		TotalPackages:         5,
 	}
 	db.DB.Create(&testImage.Commit)
 	db.DB.Create(&testImage)
@@ -82,12 +97,25 @@ func setUp() {
 	db.DB.Create(&testRepo)
 	db.DB.Create(&testUpdates)
 
+	faker := mockUnleash.NewFakeUnleash()
+
+	unleash.Initialize(
+		unleash.WithListener(&unleash.DebugListener{}),
+		unleash.WithAppName("my-application"),
+		unleash.WithUrl(faker.URL()),
+		unleash.WithRefreshInterval(1*time.Millisecond),
+	)
+	unleash.WaitForReady()
+	faker.Enable(feature.FeatureCustomRepos)
+
+	<-time.After(5 * time.Millisecond) // wait until client refreshes
+
 }
 
 func tearDown() {
-	db.DB.Exec("DELETE FROM commits")
-	db.DB.Exec("DELETE FROM repos")
-	db.DB.Exec("DELETE FROM images")
-	db.DB.Exec("DELETE FROM update_transactions")
-	os.Remove(dbName)
+	log.Info("removing routes main test db")
+	if err := os.Remove(dbName); err != nil {
+		log.Error(err.Error())
+		log.Infof("failed to remove rotes db: %s", dbName)
+	}
 }

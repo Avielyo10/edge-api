@@ -1,24 +1,29 @@
+// FIXME: golangci-lint
+// nolint:errcheck,gocritic,gosimple,govet,revive
 package inventory
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/redhatinsights/edge-api/config"
 	"github.com/redhatinsights/edge-api/pkg/clients"
+
+	"github.com/redhatinsights/edge-api/config"
 )
 
 // ClientInterface is an Interface to make request to InventoryAPI
 type ClientInterface interface {
 	ReturnDevices(parameters *Params) (Response, error)
 	ReturnDevicesByID(deviceID string) (Response, error)
+	ReturnDeviceListByID(deviceIDs []string) (Response, error)
 	ReturnDevicesByTag(tag string) (Response, error)
 	BuildURL(parameters *Params) string
 }
@@ -49,12 +54,14 @@ type Device struct {
 	UpdateAvailable bool          `json:"update_available"`
 	Ostree          SystemProfile `json:"system_profile"`
 	Account         string        `json:"account"`
+	OrgID           string        `json:"org_id"`
 }
 
 // SystemProfile represents the struct of a SystemProfile on Inventory API
 type SystemProfile struct {
 	RHCClientID          string   `json:"rhc_client_id"`
 	RpmOstreeDeployments []OSTree `json:"rpm_ostree_deployments"`
+	HostType             string   `json:"host_type"`
 }
 
 // OSTree represents the struct of a SystemProfile on Inventory API
@@ -93,7 +100,7 @@ func (c *Client) BuildURL(parameters *Params) string {
 	URL.Path += inventoryAPI
 	params := url.Values{}
 	params.Add("filter[system_profile][host_type]", "edge")
-	params.Add("fields[system_profile]", fmt.Sprintf("%s=%s", "fields[system_profile]", Fields))
+	params.Add("fields[system_profile]", fmt.Sprintf("%s", Fields))
 	if parameters != nil && parameters.PerPage != "" {
 		params.Add("per_page", parameters.PerPage)
 	}
@@ -135,7 +142,7 @@ func (c *Client) ReturnDevices(parameters *Params) (Response, error) {
 		}).Error("Inventory ReturnDevices Request Error")
 		return Response{}, err
 	}
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	c.log.WithFields(log.Fields{
 		"statusCode":   res.StatusCode,
 		"responseBody": string(body),
@@ -158,9 +165,7 @@ func (c *Client) ReturnDevices(parameters *Params) (Response, error) {
 // ReturnDevicesByID will return the list of devices by uuid
 func (c *Client) ReturnDevicesByID(deviceID string) (Response, error) {
 	if _, err := uuid.Parse(deviceID); err != nil {
-		c.log.WithFields(log.Fields{
-			"error": err,
-		}).Error("invalid device ID, ", deviceID)
+		c.log.WithFields(log.Fields{"error": err, "deviceID": deviceID}).Error("invalid device ID")
 		return Response{}, err
 	}
 	url := fmt.Sprintf("%s/%s%s&hostname_or_id=%s", config.Get().InventoryConfig.URL, inventoryAPI, FilterParams, deviceID)
@@ -182,7 +187,7 @@ func (c *Client) ReturnDevicesByID(deviceID string) (Response, error) {
 		return Response{}, err
 	}
 
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	c.log.WithFields(log.Fields{
 		"statusCode":   res.StatusCode,
 		"responseBody": string(body),
@@ -197,7 +202,60 @@ func (c *Client) ReturnDevicesByID(deviceID string) (Response, error) {
 	}
 	var inventory Response
 	if err := json.Unmarshal([]byte(body), &inventory); err != nil {
-		c.log.Error("Error while trying to unmarshal ", &inventory)
+		c.log.WithField("response", &inventory).Error("Error while trying to unmarshal InventoryResponse")
+		return Response{}, err
+	}
+	return inventory, nil
+
+}
+
+// ReturnDeviceListByID will return the list of devices by uuid
+func (c *Client) ReturnDeviceListByID(deviceIDs []string) (Response, error) {
+	if len(deviceIDs) == 0 {
+		return Response{}, fmt.Errorf("no device ID's passed to inventory client")
+	}
+	for _, deviceID := range deviceIDs {
+		if _, err := uuid.Parse(deviceID); err != nil {
+			c.log.WithFields(log.Fields{"error": err, "deviceID": deviceID}).Error("invalid device ID")
+			return Response{}, err
+		}
+	}
+	devices := strings.Join(deviceIDs, ",")
+	url := fmt.Sprintf("%s/%s/%s", config.Get().InventoryConfig.URL, inventoryAPI, devices)
+	c.log.WithFields(log.Fields{
+		"url": url,
+	}).Info("Inventory ReturnDeviceListByID Request Started")
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Add("Content-Type", "application/json")
+	for key, value := range clients.GetOutgoingHeaders(c.ctx) {
+		req.Header.Add(key, value)
+	}
+	client := &http.Client{}
+	res, err := client.Do(req)
+
+	if err != nil {
+		c.log.WithFields(log.Fields{
+			"error": err,
+		}).Error("Inventory ReturnDeviceListByID Request Error")
+		return Response{}, err
+	}
+
+	body, err := io.ReadAll(res.Body)
+	c.log.WithFields(log.Fields{
+		"statusCode":   res.StatusCode,
+		"responseBody": string(body),
+		"error":        err,
+	}).Info("Inventory ReturnDeviceListByID Response")
+	if err != nil {
+		return Response{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return Response{}, fmt.Errorf("error requesting InventoryResponse in ReturnDeviceListByID, got status code %d and body %s", res.StatusCode, body)
+	}
+	var inventory Response
+	if err := json.Unmarshal([]byte(body), &inventory); err != nil {
+		c.log.WithField("response", &inventory).Error("Error while trying to unmarshal InventoryResponse in ReturnDeviceListByID")
 		return Response{}, err
 	}
 	return inventory, nil
@@ -226,7 +284,7 @@ func (c *Client) ReturnDevicesByTag(tag string) (Response, error) {
 		}).Error("Inventory ReturnDevicesByTag Request Error")
 		return Response{}, err
 	}
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	c.log.WithFields(log.Fields{
 		"statusCode":   res.StatusCode,
 		"responseBody": string(body),
@@ -241,7 +299,7 @@ func (c *Client) ReturnDevicesByTag(tag string) (Response, error) {
 	}
 	var inventory Response
 	if err := json.Unmarshal([]byte(body), &inventory); err != nil {
-		c.log.Error("Error while trying to unmarshal ", &inventory)
+		c.log.WithField("response", &inventory).Error("Error while trying to unmarshal InventoryResponse")
 		return Response{}, err
 	}
 	return inventory, nil

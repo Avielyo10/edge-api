@@ -1,3 +1,5 @@
+// FIXME: golangci-lint
+// nolint:gofmt,goimports,revive
 package models
 
 import (
@@ -6,8 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redhatinsights/edge-api/config"
+	log "github.com/sirupsen/logrus"
+
 	"github.com/redhatinsights/edge-api/pkg/db"
+
+	"github.com/redhatinsights/edge-api/config"
 )
 
 func TestMain(m *testing.M) {
@@ -20,12 +25,11 @@ func TestMain(m *testing.M) {
 var dbName string
 
 func setUp() {
-	config.Init()
-	config.Get().Debug = true
-	time := time.Now().UnixNano()
-	dbName = fmt.Sprintf("%d-models.db", time)
+	dbTimeCreation := time.Now().UnixNano()
+	dbName = fmt.Sprintf("%d-models.db", dbTimeCreation)
 	config.Get().Database.Name = dbName
 	db.InitDB()
+
 	err := db.DB.AutoMigrate(
 		ImageSet{},
 		Commit{},
@@ -41,6 +45,11 @@ func setUp() {
 		SSHKey{},
 		DeviceGroup{},
 	)
+
+	if err != nil {
+		panic(err)
+	}
+
 	var testImage = Image{
 		Account:      "0000000",
 		Status:       ImageStatusBuilding,
@@ -50,11 +59,25 @@ func setUp() {
 		OutputTypes:  []string{ImageTypeCommit},
 	}
 	db.DB.Create(&testImage)
-	if err != nil {
-		panic(err)
-	}
 }
 
 func tearDown() {
-	os.Remove(dbName)
+	sqlDB, err := db.DB.DB()
+
+	if err != nil {
+		log.Info("Failed to acquire test database", err)
+		panic(err)
+	}
+
+	err = sqlDB.Close()
+	if err != nil {
+		log.Info("Failed to close test database", err)
+		return
+	}
+
+	err = os.Remove(dbName)
+	if err != nil {
+		log.Info("Failed to remove test database", err)
+		return
+	}
 }

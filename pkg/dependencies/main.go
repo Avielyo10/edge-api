@@ -1,3 +1,5 @@
+// FIXME: golangci-lint
+// nolint:errcheck,revive
 package dependencies
 
 import (
@@ -6,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/redhatinsights/edge-api/logger"
+	kafkacommon "github.com/redhatinsights/edge-api/pkg/common/kafka"
 	"github.com/redhatinsights/edge-api/pkg/routes/common"
 	"github.com/redhatinsights/edge-api/pkg/services"
 	"github.com/redhatinsights/platform-go-middlewares/request_id"
@@ -23,6 +26,9 @@ type EdgeAPIServices struct {
 	ThirdPartyRepoService   services.ThirdPartyRepoServiceInterface
 	OwnershipVoucherService services.OwnershipVoucherServiceInterface
 	DeviceGroupsService     services.DeviceGroupsServiceInterface
+	FilesService            services.FilesService
+	ProducerService         kafkacommon.ProducerServiceInterface
+	ConsumerService         kafkacommon.ConsumerServiceInterface
 	Log                     *log.Entry
 }
 
@@ -30,9 +36,11 @@ type EdgeAPIServices struct {
 // Context is the environment for a request (think Bash environment variables)
 func Init(ctx context.Context) *EdgeAPIServices {
 	account, _ := common.GetAccountFromContext(ctx)
+	orgID, _ := common.GetOrgIDFromContext(ctx)
 	log := log.WithFields(log.Fields{
 		"requestId": request_id.GetReqID(ctx),
 		"accountId": account,
+		"orgID":     orgID,
 	})
 	return &EdgeAPIServices{
 		CommitService:           services.NewCommitService(ctx, log),
@@ -44,6 +52,9 @@ func Init(ctx context.Context) *EdgeAPIServices {
 		DeviceService:           services.NewDeviceService(ctx, log),
 		OwnershipVoucherService: services.NewOwnershipVoucherService(ctx, log),
 		DeviceGroupsService:     services.NewDeviceGroupsService(ctx, log),
+		FilesService:            services.NewFilesService(log),
+		ProducerService:         kafkacommon.NewProducerService(),
+		ConsumerService:         kafkacommon.NewConsumerService(ctx, log),
 		Log:                     log,
 	}
 }

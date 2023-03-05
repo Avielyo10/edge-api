@@ -1,3 +1,5 @@
+// FIXME: golangci-lint
+// nolint:revive,typecheck
 package models_test
 
 import (

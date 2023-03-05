@@ -33,15 +33,28 @@ config.yaml
 
 # sqlite database
 *.db
+*.db-journal
 
 # env variables file
 .env
-
+.env_test
 # mac specific
 .DS_Store
 
 #sonarqube
+.bash_history
+.scannerwork/
+group
+passwd
 sonarqube/
 
 openapi.json
 openapi.yaml
+
+go/pkg/mod/*
+.cache
+
+# build files
+/build/
+/coverage.json
+/coverage.html

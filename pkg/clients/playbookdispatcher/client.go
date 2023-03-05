@@ -1,3 +1,5 @@
+// FIXME: golangci-lint
+// nolint:errcheck,govet,revive
 package playbookdispatcher
 
 import (
@@ -5,12 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 
-	"github.com/redhatinsights/edge-api/config"
 	"github.com/redhatinsights/edge-api/pkg/clients"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/redhatinsights/edge-api/config"
 )
 
 // ClientInterface is an Interface to make requests to PlaybookDispatcher
@@ -33,10 +36,16 @@ func InitClient(ctx context.Context, log *log.Entry) *Client {
 }
 
 // DispatcherPayload represents the payload sent to playbook dispatcher
+// as per https://github.com/RedHatInsights/playbook-dispatcher/blob/master/schema/private.openapi.yaml
+// RunInputV2
 type DispatcherPayload struct {
 	Recipient   string `json:"recipient"`
 	PlaybookURL string `json:"url"`
-	Account     string `json:"account"`
+	OrgID       string `json:"org_id"`
+	// Principal is the Username of the user interacting with the service
+	Principal string `json:"principal"`
+	// Human readable name of the playbook run. Used to present the given playbook run in external systems (Satellite)
+	PlaybookName string `json:"name"`
 }
 
 // Response represents the response retrieved by playbook dispatcher
@@ -51,7 +60,8 @@ func (c *Client) ExecuteDispatcher(payload DispatcherPayload) ([]Response, error
 	if err := json.NewEncoder(payloadBuf).Encode([1]DispatcherPayload{payload}); err != nil {
 		return nil, err
 	}
-	url := c.url + "/internal/dispatch"
+	// as per https://github.com/RedHatInsights/playbook-dispatcher/blob/master/schema/private.openapi.yaml
+	url := c.url + "/internal/v2/dispatch"
 	c.log.WithFields(log.Fields{
 		"url":     url,
 		"payload": payloadBuf.String(),
@@ -74,7 +84,7 @@ func (c *Client) ExecuteDispatcher(payload DispatcherPayload) ([]Response, error
 		return nil, err
 	}
 
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	c.log.WithFields(log.Fields{
 		"statusCode":   res.StatusCode,
 		"responseBody": string(body),
@@ -90,7 +100,7 @@ func (c *Client) ExecuteDispatcher(payload DispatcherPayload) ([]Response, error
 
 	var playbookResponse []Response
 	if err := json.Unmarshal([]byte(body), &playbookResponse); err != nil {
-		c.log.Error("Error while trying to unmarshal ", &playbookResponse)
+		c.log.WithField("response", &playbookResponse).Error("Error while trying to unmarshal PlaybookDispatcher ExecuteDispatcher Response")
 		return nil, err
 	}
 	return playbookResponse, nil

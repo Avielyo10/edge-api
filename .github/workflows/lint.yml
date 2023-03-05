@@ -2,56 +2,112 @@ name: Go
 
 on:
   push:
-    branches: [main]
+    # tags:
+    #   - v*
+    branches:
+      - main
   pull_request:
-    branches: [main]
-
+    branches:
+      - main
+permissions:
+  contents: read
+  # Optional: allow read access to pull request.  Use with 'only-new-issues' option.
+  # pull-requests: read
 jobs:
-  build:
+  golangci:
     name: Lint
     runs-on: ubuntu-latest
     steps:
       - name: Display build environment
         run: printenv
 
-      - name: Set up Go 1.x
-        uses: actions/setup-go@v2
+      - uses: actions/setup-go@v3
+        name: Set up Go 1.x
         with:
-          go-version: 1.16
+          go-version: 1.18
 
-      - name: Check out code into the Go module directory
-        uses: actions/checkout@v2
+      - uses: actions/checkout@v3
+        name: Checkout edge-api
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v3
         with:
-          fetch-depth: 2
-      
-      - name: fmt
-        run: |
-          [ $(go fmt ./... | wc -l) -eq 0 ]
+          # Optional: version of golangci-lint to use in form of v1.2 or v1.2.3 or `latest` to use the latest version
+          version: latest
 
-      - name: Get dependencies
-        run: go get -u golang.org/x/lint/golint
+          # Args should be the same as Makefile
+          # Workaround from https://github.com/golangci/golangci-lint-action/issues/119
+          args: >
+            --enable=errcheck,gocritic,gofmt,goimports,gosec,gosimple,govet,ineffassign,revive,staticcheck,typecheck,unused,bodyclose
+            --fix=false
+            --max-same-issues=20
+            --out-${NO_FUTURE}format=colored-line-number
+            --print-issued-lines=true
+            --print-linter-name=true
+            --sort-results=true
+            --timeout=5m0s
+            --uniq-by-line=false
 
-      - name: Lint
-        run: |
-          [ $(make -s lint | wc -l) -eq 0 ]
+          # Optional: working directory, useful for monorepos
+          # working-directory: somedir
 
-      - name: Vet
-        uses: addnab/docker-run-action@v3
+          # Optional: golangci-lint command line arguments.
+          # args: --issues-exit-code=0
+
+          # Optional: show only new issues if it's a pull request. The default value is `false`.
+          only-new-issues: false
+
+          # Optional: if set to true then the all caching functionality will be complete disabled,
+          #           takes precedence over all other caching options.
+          # skip-cache: true
+
+          # Optional: if set to true then the action don't cache or restore ~/go/pkg.
+          # skip-pkg-cache: true
+
+          # Optional: if set to true then the action don't cache or restore ~/.cache/go-build.
+          # skip-build-cache: true
+
+  openapi:
+    name: OpenAPI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v3
+        name: Set up Go 1.x
         with:
-          image: quay.io/fleet-management/libfdo-data:latest
-          options: -v ${{ github.workspace }}:/edge-api
-          run: make -C edge-api vet
+          go-version: 1.18
 
-      - name: Set up python3
-        uses: actions/setup-python@v2
-        with:
-         python-version: '3.9'
-
-      - name: Install openapi-spec-validator
-        run: pip install openapi-spec-validator
+      - uses: actions/checkout@v3
+        name: Checkout edge-api
 
       - name: Generate API docs spec file
         run: go run cmd/spec/main.go
-     
+
+      - name: Set up python3
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install openapi-spec-validator
+        run: pip install openapi-spec-validator==0.5.2
+
       - name: Validate spec-file
         run: python3 -m openapi_spec_validator ${{ github.workspace }}/cmd/spec/openapi.json
+
+  gocoverage:
+    name: Codecov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        name: Checkout edge-api
+
+      - name: Run Go Test Coverage output without fdo
+        run: make coverage-output-no-fdo
+
+      - name: Run Go Test Coverage without fdo
+        run: make coverage-no-fdo
+
+      - uses: codecov/codecov-action@v3
+        with:
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true

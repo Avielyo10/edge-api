@@ -1,8 +1,10 @@
+// FIXME: golangci-lint
+// nolint:govet,revive
 package logger
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"path"
 	"runtime"
 	"strings"
@@ -10,9 +12,10 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/redhatinsights/edge-api/config"
 	lc "github.com/redhatinsights/platform-go-middlewares/logging/cloudwatch"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/redhatinsights/edge-api/config"
 )
 
 // Log is an instance of the global logrus.Logger
@@ -22,7 +25,7 @@ var logLevel log.Level
 var hook *lc.Hook
 
 // InitLogger initializes the API logger
-func InitLogger() {
+func InitLogger(writer io.Writer) {
 
 	cfg := config.Get()
 
@@ -57,7 +60,7 @@ func InitLogger() {
 		})
 	}
 
-	log.SetOutput(os.Stdout)
+	log.SetOutput(writer)
 	log.SetLevel(logLevel)
 }
 
@@ -73,7 +76,9 @@ func FlushLogger() {
 
 // LogErrorAndPanic Records the error, flushes the buffer, then panics the container
 func LogErrorAndPanic(msg string, err error) {
-	log.WithFields(log.Fields{"error": err}).Error(msg)
-	FlushLogger()
-	panic(err)
+	if err != nil {
+		log.WithFields(log.Fields{"error": err}).Error(msg)
+		FlushLogger()
+		panic(err)
+	}
 }

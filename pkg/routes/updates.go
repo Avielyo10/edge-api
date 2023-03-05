@@ -1,34 +1,36 @@
+// FIXME: golangci-lint
+// nolint:govet,revive
 package routes
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi"
-	"github.com/redhatinsights/edge-api/pkg/clients/inventory"
 	"github.com/redhatinsights/edge-api/pkg/db"
 	"github.com/redhatinsights/edge-api/pkg/dependencies"
 	"github.com/redhatinsights/edge-api/pkg/errors"
 	"github.com/redhatinsights/edge-api/pkg/models"
 	"github.com/redhatinsights/edge-api/pkg/routes/common"
+	"github.com/redhatinsights/edge-api/pkg/services"
 
 	log "github.com/sirupsen/logrus"
 )
 
 // MakeUpdatesRouter adds support for operations on update
 func MakeUpdatesRouter(sub chi.Router) {
-	sub.With(common.Paginate).Get("/", GetUpdates)
+	sub.With(ValidateQueryParams("updates")).With(common.Paginate).With(ValidateGetUpdatesFilterParams).Get("/", GetUpdates)
 	sub.Post("/", AddUpdate)
 	sub.Post("/validate", PostValidateUpdate)
 	sub.Route("/{updateID}", func(r chi.Router) {
 		r.Use(UpdateCtx)
 		r.Get("/", GetUpdateByID)
 		r.Get("/update-playbook.yml", GetUpdatePlaybook)
-		r.Get("/notify", SendNotificationForDevice) //TMP ROUTE TO SEND THE NOTIFICATION
+		r.Get("/notify", SendNotificationForDevice) // TMP ROUTE TO SEND THE NOTIFICATION
 	})
 	// TODO: This is for backwards compatibility with the previous route
 	// Once the frontend starts querying the device
@@ -43,53 +45,36 @@ const UpdateContextKey updateContextKey = iota
 // UpdateCtx is a handler for Update requests
 func UpdateCtx(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		services := dependencies.ServicesFromContext(r.Context())
-		var update models.UpdateTransaction
-		account, err := common.GetAccount(r)
-		if err != nil {
-			services.Log.WithFields(log.Fields{
-				"error":   err.Error(),
-				"account": account,
-			}).Error("Error retrieving account")
-			err := errors.NewBadRequest(err.Error())
-			w.WriteHeader(err.GetStatus())
-			if err := json.NewEncoder(w).Encode(&err); err != nil {
-				services.Log.WithField("error", err.Error()).Error("Error while trying to encode")
-			}
+		ctxServices := dependencies.ServicesFromContext(r.Context())
+		var updates []models.UpdateTransaction
+		orgID := readOrgID(w, r, ctxServices.Log)
+		if orgID == "" {
 			return
 		}
 		updateID := chi.URLParam(r, "updateID")
-		services.Log = services.Log.WithField("updateID", updateID)
+		ctxServices.Log = ctxServices.Log.WithField("updateID", updateID)
 		if updateID == "" {
-			err := errors.NewBadRequest("UpdateTransactionID can't be empty")
-			w.WriteHeader(err.GetStatus())
-			if err := json.NewEncoder(w).Encode(&err); err != nil {
-				services.Log.WithField("error", err.Error()).Error("Error while trying to encode")
-			}
+			respondWithAPIError(w, ctxServices.Log, errors.NewBadRequest("UpdateTransactionID can't be empty"))
 			return
 		}
 		id, err := strconv.Atoi(updateID)
 		if err != nil {
-			err := errors.NewBadRequest(err.Error())
-			w.WriteHeader(err.GetStatus())
-			if err := json.NewEncoder(w).Encode(&err); err != nil {
-				services.Log.WithField("error", err.Error()).Error("Error while trying to encode")
-			}
+			respondWithAPIError(w, ctxServices.Log, errors.NewBadRequest(err.Error()))
 			return
 		}
-		result := db.DB.Preload("DispatchRecords").Preload("Devices").Where("update_transactions.account = ?", account).Joins("Commit").Joins("Repo").Find(&update, id)
-		if result.Error != nil {
-			services.Log.WithFields(log.Fields{
+		if result := db.Org(orgID, "update_transactions").Preload("DispatchRecords").Preload("Devices").
+			Joins("Commit").Joins("Repo").Find(&updates, id); result.Error != nil {
+			ctxServices.Log.WithFields(log.Fields{
 				"error": result.Error.Error(),
-			}).Error("Error retrieving update")
-			err := errors.NewInternalServerError()
-			w.WriteHeader(err.GetStatus())
-			if err := json.NewEncoder(w).Encode(&err); err != nil {
-				services.Log.WithField("error", err.Error()).Error("Error while trying to encode")
-			}
+			}).Error("Error retrieving updates")
+			respondWithAPIError(w, ctxServices.Log, errors.NewInternalServerError())
 			return
 		}
-		ctx := context.WithValue(r.Context(), UpdateContextKey, &update)
+		if len(updates) == 0 {
+			respondWithAPIError(w, ctxServices.Log, errors.NewNotFound("update not found"))
+			return
+		}
+		ctx := context.WithValue(r.Context(), UpdateContextKey, &updates[0])
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -105,22 +90,14 @@ func GetUpdatePlaybook(w http.ResponseWriter, r *http.Request) {
 	playbook, err := services.UpdateService.GetUpdatePlaybook(update)
 	if err != nil {
 		services.Log.WithField("error", err.Error()).Error("Error getting update playbook")
-		err := errors.NewInternalServerError()
-		w.WriteHeader(err.GetStatus())
-		if err := json.NewEncoder(w).Encode(&err); err != nil {
-			services.Log.WithField("error", err.Error()).Error("Error while trying to encode")
-		}
+		respondWithAPIError(w, services.Log, errors.NewNotFound("file was not found on the S3 bucket"))
 		return
 	}
 	defer playbook.Close()
 	_, err = io.Copy(w, playbook)
 	if err != nil {
 		services.Log.WithField("error", err.Error()).Error("Error reading the update playbook")
-		err := errors.NewInternalServerError()
-		w.WriteHeader(err.GetStatus())
-		if err := json.NewEncoder(w).Encode(&err); err != nil {
-			services.Log.WithField("error", err.Error()).Error("Error while trying to encode")
-		}
+		respondWithAPIError(w, services.Log, errors.NewInternalServerError())
 		return
 	}
 }
@@ -128,338 +105,213 @@ func GetUpdatePlaybook(w http.ResponseWriter, r *http.Request) {
 // GetUpdates returns the updates for the device
 func GetUpdates(w http.ResponseWriter, r *http.Request) {
 	services := dependencies.ServicesFromContext(r.Context())
+	result := updateFilters(r, db.DB)
+	pagination := common.GetPagination(r)
 	var updates []models.UpdateTransaction
-	account, err := common.GetAccount(r)
-	if err != nil {
-		services.Log.WithFields(log.Fields{
-			"error":   err.Error(),
-			"account": account,
-		}).Error("Error retrieving account")
-		err := errors.NewBadRequest(err.Error())
-		w.WriteHeader(err.GetStatus())
-		if err := json.NewEncoder(w).Encode(&err); err != nil {
-			services.Log.WithField("error", err.Error()).Error("Error while trying to encode")
-		}
+	orgID := readOrgID(w, r, services.Log)
+	if orgID == "" {
 		return
 	}
-	// FIXME - need to sort out how to get this query to be against commit.account
-	result := db.DB.Preload("DispatchRecords").Preload("Devices").Where("update_transactions.account = ?", account).Joins("Commit").Joins("Repo").Find(&updates)
-	if result.Error != nil {
+	if result = db.OrgDB(orgID, result, "update_transactions").Limit(pagination.Limit).Offset(pagination.Offset).Preload("DispatchRecords").Preload("Devices").
+		Joins("Commit").Joins("Repo").Find(&updates); result.Error != nil {
 		services.Log.WithFields(log.Fields{
 			"error": result.Error.Error(),
 		}).Error("Error retrieving updates")
-		err := errors.NewBadRequest(err.Error())
-		w.WriteHeader(err.GetStatus())
-		if err := json.NewEncoder(w).Encode(&err); err != nil {
-			services.Log.WithField("error", err.Error()).Error("Error while trying to encode")
-		}
+		respondWithAPIError(w, services.Log, errors.NewInternalServerError())
 		return
 	}
 
-	if err := json.NewEncoder(w).Encode(&updates); err != nil {
-		services.Log.WithField("error", updates).Error("Error while trying to encode")
-	}
+	respondWithJSONBody(w, services.Log, &updates)
 }
 
-//DevicesUpdate contains the update structure for the device
-type DevicesUpdate struct {
-	CommitID    uint     `json:"CommitID"`
-	DevicesUUID []string `json:"DevicesUUID"`
-	// TODO: Implement updates by tag
-	// Tag        string `json:"Tag"`
-}
-
-func updateFromHTTP(w http.ResponseWriter, r *http.Request) (*[]models.UpdateTransaction, error) {
-	services := dependencies.ServicesFromContext(r.Context())
-	services.Log.Info("Update is being created")
-
-	account, err := common.GetAccount(r)
-	if err != nil {
-		services.Log.WithFields(log.Fields{
-			"error":   err.Error(),
-			"account": account,
-		}).Error("Error retrieving account")
-		err := errors.NewBadRequest(err.Error())
-		w.WriteHeader(err.GetStatus())
-		if err := json.NewEncoder(w).Encode(&err); err != nil {
-			services.Log.WithField("error", err.Error()).Error("Error while trying to encode")
-		}
-		return nil, err
+func updateFromHTTP(w http.ResponseWriter, r *http.Request) *[]models.UpdateTransaction {
+	ctxServices := dependencies.ServicesFromContext(r.Context())
+	ctxServices.Log.Info("Update is being created")
+	orgID := readOrgID(w, r, ctxServices.Log)
+	if orgID == "" {
+		return nil
 	}
-
-	var devicesUpdate DevicesUpdate
-	err = json.NewDecoder(r.Body).Decode(&devicesUpdate)
-	if err != nil {
-		err := errors.NewBadRequest("Invalid JSON")
-		w.WriteHeader(err.GetStatus())
-		return nil, err
+	var devicesUpdate models.DevicesUpdate
+	if err := readRequestJSONBody(w, r, ctxServices.Log, &devicesUpdate); err != nil {
+		return nil
 	}
-	services.Log.WithField("updateJSON", devicesUpdate).Debug("Update JSON received")
+	ctxServices.Log.WithField("updateJSON", devicesUpdate).Debug("Update JSON received")
 
-	if devicesUpdate.CommitID == 0 {
-		err := errors.NewBadRequest("Must provide a CommitID")
-		w.WriteHeader(err.GetStatus())
-		return nil, err
-	}
 	// TODO: Implement update by tag - Add validation per tag
 	if devicesUpdate.DevicesUUID == nil {
-		err := errors.NewBadRequest("DeviceUUID required.")
-		w.WriteHeader(err.GetStatus())
-		return nil, err
+		respondWithAPIError(w, ctxServices.Log, errors.NewBadRequest("DeviceUUID required."))
+		return nil
 	}
-	client := inventory.InitClient(r.Context(), log.NewEntry(log.StandardLogger()))
-	var inv inventory.Response
-	var ii []inventory.Response
-	if len(devicesUpdate.DevicesUUID) > 0 {
-		for _, UUID := range devicesUpdate.DevicesUUID {
-			inv, err = client.ReturnDevicesByID(UUID)
-			if inv.Count >= 0 {
-				ii = append(ii, inv)
-			}
-			if err != nil {
-				err := errors.NewNotFound(fmt.Sprintf("No devices found for UUID %s", UUID))
-				w.WriteHeader(err.GetStatus())
-				return nil, err
-			}
+	// remove any duplicates
+	devicesUUID := make([]string, 0, len(devicesUpdate.DevicesUUID))
+	devicesUUIDSMap := make(map[string]bool, len(devicesUpdate.DevicesUUID))
+	for _, deviceUUID := range devicesUpdate.DevicesUUID {
+		if _, ok := devicesUUIDSMap[deviceUUID]; !ok {
+			devicesUUID = append(devicesUUID, deviceUUID)
+			devicesUUIDSMap[deviceUUID] = true
 		}
 	}
-
-	services.Log.WithField("inventoryDevice", inv).Debug("Device retrieved from inventory")
-	var updates []models.UpdateTransaction
-	for _, inventory := range ii {
-		// Create the models.UpdateTransaction
-		update := models.UpdateTransaction{
-			Account:  account,
-			CommitID: devicesUpdate.CommitID,
-			Status:   models.UpdateStatusCreated,
-			// TODO: Implement update by tag
-			// Tag:      updateJSON.Tag,
-		}
-
-		// Get the models.Commit from the Commit ID passed in via JSON
-		update.Commit, err = services.CommitService.GetCommitByID(devicesUpdate.CommitID)
-		services.Log.WithField("commit", update.Commit).Debug("Commit retrieved from this update")
-
-		notify, errNotify := services.UpdateService.SendDeviceNotification(&update)
-		if errNotify != nil {
-			services.Log.WithField("message", errNotify.Error()).Error("Error to send notification")
-			services.Log.WithField("message", notify).Error("Notify Error")
-
-		}
-		update.DispatchRecords = []models.DispatchRecord{}
+	// check that all submitted devices exists
+	var devicesCount int64
+	if result := db.Org(orgID, "").Model(&models.Device{}).Where("uuid IN (?)", devicesUUID).Count(&devicesCount); result.Error != nil {
+		ctxServices.Log.WithFields(log.Fields{
+			"error": result.Error.Error(),
+		}).Error("failed to get devices count")
+		apiError := errors.NewInternalServerError()
+		apiError.SetTitle("failed to get devices count")
+		respondWithAPIError(w, ctxServices.Log, apiError)
+		return nil
+	}
+	if int64(len(devicesUUID)) != devicesCount {
+		respondWithAPIError(w, ctxServices.Log, errors.NewNotFound("some devices where not found"))
+		return nil
+	}
+	var commit *models.Commit
+	if devicesUpdate.CommitID == 0 {
+		commitID, err := ctxServices.DeviceService.GetLatestCommitFromDevices(orgID, devicesUUID)
 		if err != nil {
-			services.Log.WithFields(log.Fields{
+			ctxServices.Log.WithFields(log.Fields{
+				"error": err.Error(),
+			}).Error("error when getting latest commit for devices")
+			var apiError errors.APIError
+			switch err.(type) {
+			case *services.DeviceHasImageUndefined, *services.ImageHasNoImageSet, *services.DevicesHasMoreThanOneImageSet, *services.DeviceHasNoImageUpdate:
+				apiError = errors.NewBadRequest(err.Error())
+			default:
+				apiError = errors.NewInternalServerError()
+				apiError.SetTitle("failed to get latest commit for devices")
+			}
+			respondWithAPIError(w, ctxServices.Log, apiError)
+			return nil
+		}
+		devicesUpdate.CommitID = commitID
+		commit, err = ctxServices.CommitService.GetCommitByID(devicesUpdate.CommitID, orgID)
+		if err != nil {
+			ctxServices.Log.WithFields(log.Fields{
+				"error":    err.Error(),
+				"commitID": devicesUpdate.CommitID,
+			}).Error("Can't find latest commit for the devices")
+			respondWithAPIError(w, ctxServices.Log, errors.NewNotFound(fmt.Sprintf("No commit found for CommitID %d", devicesUpdate.CommitID)))
+			return nil
+		}
+	} else {
+		// validate if commit is valid before continue process
+		var err error
+		commit, err = ctxServices.CommitService.GetCommitByID(devicesUpdate.CommitID, orgID)
+		if err != nil {
+			ctxServices.Log.WithFields(log.Fields{
 				"error":    err.Error(),
 				"commitID": devicesUpdate.CommitID,
 			}).Error("No commit found for Commit ID")
-			err := errors.NewInternalServerError()
-			err.SetTitle(fmt.Sprintf("No commit found for CommitID %d", devicesUpdate.CommitID))
-			w.WriteHeader(err.GetStatus())
-			return nil, err
+			respondWithAPIError(w, ctxServices.Log, errors.NewNotFound(fmt.Sprintf("No commit found for CommitID %d", devicesUpdate.CommitID)))
+			return nil
 		}
-
-		//  Removing commit dependency to avoid overwriting the repo
-		var repo *models.Repo
-		services.Log.WithField("updateID", update.ID).Debug("Ceating new repo for update transaction")
-		repo = &models.Repo{
-			Status: models.RepoStatusBuilding,
+		// validate if user provided commitID belong to same ImageSet as of Device Image
+		if err := ctxServices.CommitService.ValidateDevicesImageSetWithCommit(devicesUUID, devicesUpdate.CommitID); err != nil {
+			ctxServices.Log.WithFields(log.Fields{
+				"error":    err.Error(),
+				"commitID": devicesUpdate.CommitID,
+			}).Error(err.Error())
+			respondWithAPIError(w, ctxServices.Log, errors.NewBadRequest(fmt.Sprintf("Commit %d %v", devicesUpdate.CommitID, err.Error())))
+			return nil
 		}
-		result := db.DB.Create(&repo)
-		if result.Error != nil {
-			services.Log.WithField("error", result.Error.Error()).Debug("Result error")
-			err := errors.NewBadRequest(result.Error.Error())
-			w.WriteHeader(err.GetStatus())
-			if err := json.NewEncoder(w).Encode(&err); err != nil {
-				services.Log.WithField("error", result.Error.Error()).Error("Error while trying to encode")
-			}
-		}
-		update.Repo = repo
-		services.Log.WithFields(log.Fields{
-			"repoURL": repo.URL,
-			"repoID":  repo.ID,
-		}).Debug("Getting repo info")
-
-		devices := update.Devices
-		oldCommits := update.OldCommits
-
-		for _, device := range inventory.Result {
-			//  Check for the existence of a Repo that already has this commit and don't duplicate
-			var updateDevice *models.Device
-			updateDevice, err = services.DeviceService.GetDeviceByUUID(device.ID)
-			if err != nil {
-				if !(err.Error() == "Device was not found") {
-					services.Log.WithField("error", err.Error()).Error("Device was not found in our database")
-					err := errors.NewBadRequest(err.Error())
-					w.WriteHeader(err.GetStatus())
-					if err := json.NewEncoder(w).Encode(&err); err != nil {
-						services.Log.WithField("error", err.Error()).Error("Error while trying to encode")
-					}
-					return nil, err
-				}
-				services.Log.WithFields(log.Fields{
-					"error":      err.Error(),
-					"deviceUUID": device.ID,
-				}).Info("Creating a new device on the database")
-				updateDevice = &models.Device{
-					UUID:    device.ID,
-					Account: account,
-				}
-				if result := db.DB.Create(&updateDevice); result.Error != nil {
-					return nil, result.Error
-				}
-			}
-			updateDevice.RHCClientID = device.Ostree.RHCClientID
-			updateDevice.AvailableHash = update.Commit.OSTreeCommit
-			// update the device account if undefined
-			if updateDevice.Account == "" {
-				updateDevice.Account = account
-			}
-			result := db.DB.Save(&updateDevice)
-			if result.Error != nil {
-				return nil, result.Error
-			}
-
-			services.Log.WithFields(log.Fields{
-				"updateDevice": updateDevice,
-			}).Debug("Saved updated device")
-
-			devices = append(devices, *updateDevice)
-			update.Devices = devices
-
-			for _, deployment := range device.Ostree.RpmOstreeDeployments {
-				services.Log.WithFields(log.Fields{
-					"ostreeDeployment": deployment,
-				}).Debug("Got ostree deployment for device")
-				if deployment.Booted {
-					services.Log.WithFields(log.Fields{
-						"booted": deployment.Booted,
-					}).Debug("device has been booted")
-					var oldCommit models.Commit
-					result := db.DB.Where("os_tree_commit = ?", deployment.Checksum).First(&oldCommit)
-					if result.Error != nil {
-						if result.Error.Error() != "record not found" {
-							services.Log.WithField("error", err.Error()).Error("Error returning old commit for this ostree checksum")
-							err := errors.NewBadRequest(err.Error())
-							w.WriteHeader(err.GetStatus())
-							if err := json.NewEncoder(w).Encode(&err); err != nil {
-								services.Log.WithField("error", err.Error()).Error("Error encoding error")
-							}
-							return nil, err
-						}
-					}
-					if result.RowsAffected == 0 {
-						services.Log.Debug("No old commits found")
-					} else {
-						oldCommits = append(oldCommits, oldCommit)
-					}
-				}
-			}
-
-			update.OldCommits = oldCommits
-			if err := db.DB.Save(&update).Error; err != nil {
-				err := errors.NewBadRequest(err.Error())
-				w.WriteHeader(err.GetStatus())
-				if err := json.NewEncoder(w).Encode(&err); err != nil {
-					services.Log.WithField("error", err.Error()).Error("Error encoding error")
-				}
-				return nil, err
-			}
-		}
-		updates = append(updates, update)
-		services.Log.WithField("updateID", update.ID).Info("Update has been created")
-
 	}
-	return &updates, nil
+	ctxServices.Log.WithField("commit", commit.ID).Debug("Commit retrieved from this update")
+	updates, err := ctxServices.UpdateService.BuildUpdateTransactions(&devicesUpdate, orgID, commit)
+	if err != nil {
+		ctxServices.Log.WithFields(log.Fields{
+			"error":  err.Error(),
+			"org_id": orgID,
+		}).Error("Error building update transaction")
+		apiError := errors.NewInternalServerError()
+		apiError.SetTitle("Error building update transaction")
+		respondWithAPIError(w, ctxServices.Log, apiError)
+		return nil
+	}
+
+	if len(*updates) == 0 {
+		ctxServices.Log.WithFields(log.Fields{
+			"org_id": orgID,
+		}).Info("There are no updates to perform")
+		respondWithJSONBody(w, ctxServices.Log, common.APIResponse{Message: "There are no updates to perform"})
+		return nil
+	}
+
+	return updates
 }
 
 // AddUpdate updates a device
 func AddUpdate(w http.ResponseWriter, r *http.Request) {
-	services := dependencies.ServicesFromContext(r.Context())
-	services.Log.Info("Starting update")
-	updates, err := updateFromHTTP(w, r)
-	if err != nil {
-		services.Log.WithFields(log.Fields{
-			"error": err.Error(),
-		}).Error("Error building update from request")
-		err := errors.NewBadRequest(err.Error())
-		w.WriteHeader(err.GetStatus())
+	ctxServices := dependencies.ServicesFromContext(r.Context())
+	ctxServices.Log.Info("Starting update")
+	orgID := readOrgID(w, r, ctxServices.Log)
+	if orgID == "" {
+		return
+	}
+	updates := updateFromHTTP(w, r)
+	if updates == nil {
+		// errors handled by updateFromHTTP
 		return
 	}
 	var upd []models.UpdateTransaction
 
 	for _, update := range *updates {
-		update.Account, err = common.GetAccount(r)
-		if err != nil {
-			services.Log.WithFields(log.Fields{
-				"error": err.Error(),
-			}).Error("Error retrieving account")
-			err := errors.NewBadRequest(err.Error())
-			w.WriteHeader(err.GetStatus())
-			return
-		}
+		update.OrgID = orgID
 		upd = append(upd, update)
-		services.Log.WithField("updateID", update.ID).Info("Starting asynchronous update process")
-		go services.UpdateService.CreateUpdate(update.ID)
+		ctxServices.Log.WithField("updateID", update.ID).Info("Starting asynchronous update process")
+		if update.Status != models.UpdateStatusDeviceDisconnected {
+			ctxServices.UpdateService.CreateUpdateAsync(update.ID)
+		}
 	}
-	result := db.DB.Save(upd)
-	if result.Error != nil {
-		services.Log.WithFields(log.Fields{
-			"error": err.Error(),
+	if result := db.DB.Omit("Devices.*").Save(upd); result.Error != nil {
+		ctxServices.Log.WithFields(log.Fields{
+			"error": result.Error.Error(),
 		}).Error("Error saving update")
-		err := errors.NewInternalServerError()
-		w.WriteHeader(err.GetStatus())
+		respondWithAPIError(w, ctxServices.Log, errors.NewInternalServerError())
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(updates); err != nil {
-		services.Log.WithField("error", updates).Error("Error while trying to encode")
-	}
-
+	respondWithJSONBody(w, ctxServices.Log, updates)
 }
 
-// GetUpdateByID obtains an update from the database for an account
+// GetUpdateByID obtains an update from the database for an orgID
 func GetUpdateByID(w http.ResponseWriter, r *http.Request) {
+	ctxServices := dependencies.ServicesFromContext(r.Context())
 	update := getUpdate(w, r)
 	if update == nil {
 		// Error set by UpdateCtx already
 		return
 	}
-	if err := json.NewEncoder(w).Encode(update); err != nil {
-		services := dependencies.ServicesFromContext(r.Context())
-		services.Log.WithField("error", update).Error("Error while trying to encode")
-	}
+	respondWithJSONBody(w, ctxServices.Log, update)
 }
 
 func getUpdate(w http.ResponseWriter, r *http.Request) *models.UpdateTransaction {
+	ctxServices := dependencies.ServicesFromContext(r.Context())
 	ctx := r.Context()
 	update, ok := ctx.Value(UpdateContextKey).(*models.UpdateTransaction)
 	if !ok {
-		// Error set by UpdateCtx already
+		respondWithAPIError(w, ctxServices.Log, errors.NewNotFound("update-transaction not found in context"))
 		return nil
 	}
 	return update
 }
 
-//SendNotificationForDevice TMP route to validate
+// SendNotificationForDevice TMP route to validate
 func SendNotificationForDevice(w http.ResponseWriter, r *http.Request) {
 	if update := getUpdate(w, r); update != nil {
-		services := dependencies.ServicesFromContext(r.Context())
-		notify, err := services.UpdateService.SendDeviceNotification(update)
+		ctxServices := dependencies.ServicesFromContext(r.Context())
+		notify, err := ctxServices.UpdateService.SendDeviceNotification(update)
 		if err != nil {
-			services.Log.WithField("error", err.Error()).Error("Failed to retry to send notification")
+			ctxServices.Log.WithField("error", err.Error()).Error("Failed to retry to send notification")
 			err := errors.NewInternalServerError()
-			err.SetTitle("Failed creating image")
-			w.WriteHeader(err.GetStatus())
-			if err := json.NewEncoder(w).Encode(&err); err != nil {
-				services.Log.WithField("error", err.Error()).Error("Error while trying to encode")
-			}
+			err.SetTitle("Failed to send notification")
+			respondWithAPIError(w, ctxServices.Log, err)
 			return
 		}
-		services.Log.WithField("StatusOK", http.StatusOK).Info("Writting Header")
+		ctxServices.Log.WithField("StatusOK", http.StatusOK).Info("Writing Header")
+
 		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(notify); err != nil {
-			services.Log.WithField("error", notify).Error("Error while trying to encode")
-		}
+		respondWithJSONBody(w, ctxServices.Log, &notify)
 	}
 }
 
@@ -471,13 +323,8 @@ type ValidateUpdateResponse struct {
 // PostValidateUpdate validate that images can be updated
 func PostValidateUpdate(w http.ResponseWriter, r *http.Request) {
 	services := dependencies.ServicesFromContext(r.Context())
-	account, err := common.GetAccount(r)
-	if err != nil {
-		services.Log.WithFields(log.Fields{
-			"error":   err.Error(),
-			"account": account,
-		}).Error("Error retrieving account")
-		respondWithAPIError(w, services.Log, errors.NewBadRequest(err.Error()))
+	orgID := readOrgID(w, r, services.Log)
+	if orgID == "" {
 		return
 	}
 
@@ -496,7 +343,7 @@ func PostValidateUpdate(w http.ResponseWriter, r *http.Request) {
 		ids = append(ids, images[i].ID)
 	}
 
-	valid, err := services.UpdateService.ValidateUpdateSelection(account, ids)
+	valid, err := services.UpdateService.ValidateUpdateSelection(orgID, ids)
 
 	if err != nil {
 		services.Log.WithFields(log.Fields{
@@ -508,4 +355,56 @@ func PostValidateUpdate(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	respondWithJSONBody(w, services.Log, &ValidateUpdateResponse{UpdateValid: valid})
+}
+
+var updateFilters = common.ComposeFilters(
+	// Filter handler for "status"
+	common.OneOfFilterHandler(&common.Filter{
+		QueryParam: "status",
+		DBField:    "update_transactions.status",
+	}),
+	// Filter handler for "created_at"
+	common.CreatedAtFilterHandler(&common.Filter{
+		QueryParam: "created_at",
+		DBField:    "update_transactions.created_at",
+	}),
+	common.SortFilterHandler("update_transactions", "created_at", "DESC"),
+)
+
+// ValidateGetUpdatesFilterParams validate the query params that sent to /updates endpoint
+func ValidateGetUpdatesFilterParams(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctxServices := dependencies.ServicesFromContext(r.Context())
+		var errs []validationError
+
+		// "created_at" validation
+		if val := r.URL.Query().Get("created_at"); val != "" {
+			if _, err := time.Parse(common.LayoutISO, val); err != nil {
+				errs = append(errs, validationError{Key: "created_at", Reason: err.Error()})
+			}
+		}
+		// "updated_at" validation
+		if val := r.URL.Query().Get("updated_at"); val != "" {
+			if _, err := time.Parse(common.LayoutISO, val); err != nil {
+				errs = append(errs, validationError{Key: "updated_at", Reason: err.Error()})
+			}
+		}
+		// "sort_by" validation for "name", "created_at", "updated_at"
+		if val := r.URL.Query().Get("sort_by"); val != "" {
+			name := val
+			if string(val[0]) == "-" {
+				name = val[1:]
+			}
+			if name != "created_at" && name != "updated_at" {
+				errs = append(errs, validationError{Key: "sort_by", Reason: fmt.Sprintf("%s is not a valid sort_by. Sort-by must be created_at or updated_at", name)})
+			}
+		}
+
+		if len(errs) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		respondWithJSONBody(w, ctxServices.Log, &errs)
+	})
 }

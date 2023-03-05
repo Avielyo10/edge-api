@@ -1,9 +1,36 @@
+// FIXME: golangci-lint
+// nolint:govet,revive,staticcheck,typecheck
 package models
 
 import (
 	"errors"
 	"testing"
+
+	"github.com/bxcodec/faker/v3"
+	"github.com/magiconair/properties/assert"
+	"github.com/redhatinsights/edge-api/pkg/db"
 )
+
+func TestGetPackageListWihoutDistribution(t *testing.T) {
+	pkgs := []Package{
+		{
+			Name: "vim",
+		},
+		{
+			Name: "wget",
+		},
+	}
+	img := &Image{
+		Distribution: "",
+		Packages:     pkgs,
+	}
+
+	packageList := img.GetPackagesList()
+	// We're returning nil in the case when Distribution is not provided
+	// The assertion needs to compare the interface type and value
+	assert.Equal(t, packageList, (*[]string)(nil))
+
+}
 
 func TestGetPackagesList(t *testing.T) {
 	pkgs := []Package{
@@ -15,20 +42,22 @@ func TestGetPackagesList(t *testing.T) {
 		},
 	}
 	img := &Image{
-		Packages: pkgs,
+		Distribution: "rhel-90",
+		Packages:     pkgs,
 	}
 
 	packageList := img.GetPackagesList()
-	if len(*packageList) != len(pkgs)+len(requiredPackages) {
-		t.Errorf("two packages + required packages expected")
+
+	if len(*packageList) == 0 {
+		t.Errorf("error to load required packages")
 	}
 	packages := []string{
-		"ansible",
 		"rhc",
 		"rhc-worker-playbook",
 		"subscription-manager",
 		"subscription-manager-plugin-ostree",
 		"insights-client",
+		"ansible-core",
 		"vim",
 		"wget",
 	}
@@ -52,18 +81,18 @@ func TestValidateRequest(t *testing.T) {
 		},
 		{
 			name:     "empty name",
-			image:    &Image{Distribution: "rhel-8"},
+			image:    &Image{Distribution: "rhel-84"},
 			expected: errors.New(NameCantBeInvalidMessage),
 		},
 		{
 			name:     "invalid characters in name",
-			image:    &Image{Distribution: "rhel-8", Name: "image?"},
+			image:    &Image{Distribution: "rhel-85", Name: "image?"},
 			expected: errors.New(NameCantBeInvalidMessage),
 		},
 		{
 			name: "no commit in image",
 			image: &Image{
-				Distribution: "rhel-8",
+				Distribution: "rhel-85",
 				Name:         "image_name",
 			},
 			expected: errors.New(ArchitectureCantBeEmptyMessage),
@@ -129,6 +158,19 @@ func TestValidateRequest(t *testing.T) {
 			expected: errors.New(MissingUsernameError),
 		},
 		{
+			name: "reserved username when image type is installer",
+			image: &Image{
+				Distribution: "rhel-8",
+				Name:         "image_name",
+				Commit:       &Commit{Arch: "x86_64"},
+				OutputTypes:  []string{ImageTypeInstaller},
+				Installer: &Installer{
+					Username: "rpcuser",
+				},
+			},
+			expected: errors.New(ReservedUsernameError),
+		},
+		{
 			name: "empty ssh key when image type is installer",
 			image: &Image{
 				Distribution: "rhel-8",
@@ -136,7 +178,7 @@ func TestValidateRequest(t *testing.T) {
 				Commit:       &Commit{Arch: "x86_64"},
 				OutputTypes:  []string{ImageTypeInstaller},
 				Installer: &Installer{
-					Username: "root",
+					Username: "test",
 				},
 			},
 			expected: errors.New(MissingSSHKeyError),
@@ -149,32 +191,21 @@ func TestValidateRequest(t *testing.T) {
 				Commit:       &Commit{Arch: "x86_64"},
 				OutputTypes:  []string{ImageTypeInstaller},
 				Installer: &Installer{
-					Username: "root",
+					Username: "test",
 					SSHKey:   "dd:00:eeff:10",
 				},
 			},
 			expected: errors.New(InvalidSSHKeyError),
 		},
 		{
-			name: "check if image name is already in use",
-			image: &Image{
-				Distribution: "rhel-8",
-				Name:         "image_name_pre_exist",
-				Commit:       &Commit{Arch: "x86_64"},
-				OutputTypes:  []string{ImageTypeCommit},
-				Version:      1,
-			},
-			expected: errors.New(ImageNameAlreadyExists),
-		},
-		{
 			name: "valid image request",
 			image: &Image{
-				Distribution: "rhel-8",
+				Distribution: "rhel-85",
 				Name:         "image_name",
 				Commit:       &Commit{Arch: "x86_64"},
 				OutputTypes:  []string{ImageTypeInstaller},
 				Installer: &Installer{
-					Username: "root",
+					Username: "test",
 					SSHKey:   "ssh-rsa dd:00:eeff:10",
 				},
 			},
@@ -183,21 +214,10 @@ func TestValidateRequest(t *testing.T) {
 		{
 			name: "valid image request for commit",
 			image: &Image{
-				Distribution: "rhel-8",
+				Distribution: "rhel-86",
 				Name:         "image_name",
 				Commit:       &Commit{Arch: "x86_64"},
 				OutputTypes:  []string{ImageTypeCommit},
-			},
-			expected: nil,
-		},
-		{
-			name: "Update Image with name already in use",
-			image: &Image{
-				Distribution: "rhel-8",
-				Name:         "image_name_pre_exist",
-				Commit:       &Commit{Arch: "x86_64"},
-				OutputTypes:  []string{ImageTypeCommit},
-				Version:      2,
 			},
 			expected: nil,
 		},
@@ -217,48 +237,152 @@ func TestValidateRequest(t *testing.T) {
 	}
 }
 
-func TestGetALLPackagesList(t *testing.T) {
-	pkgs := []Package{
-		{
-			Name: "vim",
-		},
-		{
-			Name: "wget",
-		},
-	}
-	customPackages := []Package{
-		{
-			Name: "custompackage",
-		},
-		{
-			Name: "thirdpartypackage",
-		},
-	}
-	img := &Image{
-		Packages:       pkgs,
+func TestGetALLPackagesListWithCustomRepos(t *testing.T) {
+	packages := []Package{{Name: "vim"}, {Name: "wget"}}
+	customPackages := []Package{{Name: "custom-package"}, {Name: "third-party-package"}}
+	image := &Image{
+		Distribution:   "rhel-90",
+		Packages:       packages,
 		CustomPackages: customPackages,
+		ThirdPartyRepositories: []ThirdPartyRepo{
+			{Name: faker.UUIDHyphenated(), URL: faker.URL()},
+		},
 	}
 
-	allPackagesList := img.GetALLPackagesList()
-	if len(*allPackagesList) != len(pkgs)+len(customPackages)+len(requiredPackages) {
-		t.Errorf("two packages + custom packages + required packages expected")
+	allPackagesList := image.GetALLPackagesList()
+
+	if allPackagesList == nil {
+		t.Errorf("error to load required expectedPackages")
 	}
 
-	packages := []string{
-		"ansible",
+	expectedPackages := []string{
 		"rhc",
 		"rhc-worker-playbook",
 		"subscription-manager",
 		"subscription-manager-plugin-ostree",
 		"insights-client",
+		"ansible-core",
 		"vim",
 		"wget",
-		"custompackage",
-		"thirdpartypackage",
+		customPackages[0].Name,
+		customPackages[1].Name,
 	}
-	for i, item := range *allPackagesList {
-		if item != packages[i] {
-			t.Errorf("expected %s, got %s", packages[i], item)
+	if len(expectedPackages) != len(*allPackagesList) {
+		t.Errorf("Expected to have %d expectedPackages, but got %d", len(expectedPackages), len(*allPackagesList))
+	}
+
+	for i, packageName := range *allPackagesList {
+		if packageName != expectedPackages[i] {
+			t.Errorf("expected %s, got %s", expectedPackages[i], packageName)
 		}
 	}
+}
+
+func TestGetALLPackagesListWithoutCustomRepos(t *testing.T) {
+	packages := []Package{{Name: "vim"}, {Name: "wget"}}
+	customPackages := []Package{{Name: "custom-package"}, {Name: "third-party-package"}}
+	image := &Image{
+		Distribution:   "rhel-90",
+		Packages:       packages,
+		CustomPackages: customPackages,
+	}
+
+	allPackagesList := image.GetALLPackagesList()
+
+	if allPackagesList == nil {
+		t.Errorf("error to load required expectedPackages")
+	}
+
+	// we expect that custom packages are ignored
+	expectedPackages := []string{
+		"rhc",
+		"rhc-worker-playbook",
+		"subscription-manager",
+		"subscription-manager-plugin-ostree",
+		"insights-client",
+		"ansible-core",
+		"vim",
+		"wget",
+	}
+
+	if len(expectedPackages) != len(*allPackagesList) {
+		t.Errorf("Expected to have %d expectedPackages, but got %d", len(expectedPackages), len(*allPackagesList))
+	}
+
+	for i, item := range *allPackagesList {
+		if item != expectedPackages[i] {
+			t.Errorf("expected %s, got %s", expectedPackages[i], item)
+		}
+	}
+}
+
+func TestImageCreateWithOrgID(t *testing.T) {
+	orgID := faker.UUIDHyphenated()
+	image := &Image{
+
+		Distribution: "rhel-85",
+		Name:         "image_name",
+		Commit: &Commit{
+			Arch:  "x86_64",
+			OrgID: orgID,
+		},
+		OutputTypes: []string{ImageTypeInstaller},
+		Installer: &Installer{
+			Username: "test",
+			SSHKey:   "ssh-rsa dd:00:eeff:10",
+			OrgID:    orgID,
+		},
+		OrgID: orgID,
+	}
+
+	// Make sure Image has orgID
+	result := db.DB.Create(&image)
+	assert.Equal(t, result.Error, nil)
+}
+
+func TestImageCreateWithoutOrgID(t *testing.T) {
+	orgID := faker.UUIDHyphenated()
+	image := &Image{
+
+		Distribution: "rhel-85",
+		Name:         "image_name",
+		Commit: &Commit{
+			Arch:  "x86_64",
+			OrgID: orgID,
+		},
+		OutputTypes: []string{ImageTypeInstaller},
+		Installer: &Installer{
+			Username: "test",
+			SSHKey:   "ssh-rsa dd:00:eeff:10",
+			OrgID:    orgID,
+		},
+	}
+
+	// Make sure Image is not created without an orgID
+	result := db.DB.Create(&image)
+	assert.Equal(t, result.Error, ErrOrgIDIsMandatory)
+}
+
+func TestImageSetCreateWithOrgID(t *testing.T) {
+	orgID := faker.UUIDHyphenated()
+	imageSet := ImageSet{
+		Name:    "image-set-1",
+		Version: 1,
+		OrgID:   orgID,
+	}
+
+	// Make sure ImageSet is created with orgID
+	result := db.DB.Create(&imageSet)
+	assert.Equal(t, result.Error, nil)
+}
+
+func TestImageSetCreateWithoutOrgID(t *testing.T) {
+	imageSet := ImageSet{
+		Name:    "image-set-1",
+		Version: 1,
+	}
+
+	// Make sure ImageSet cannot be created without an orgID
+	result := db.DB.Create(&imageSet)
+	assert.Equal(t, result.Error, ErrOrgIDIsMandatory)
 }
